@@ -7,6 +7,7 @@ import { verifyMicrosoftToken, isEmailAllowed, AuthError } from "./auth/microsof
 import { buildUserContext, NotProvisionedError } from "./auth/vault";
 import { registerOAuthProxyRoutes } from "./auth/oauthProxy";
 import { resolveStaticApiKey } from "./auth/apiKeys";
+import { applyToolProfile, ToolProfile } from "./tools/profiles";
 import { getBoxAuthorizationUrl, exchangeBoxCodeForTokens } from "./box/auth";
 import {
   getGrowAuthorizationUrl,
@@ -55,12 +56,18 @@ import { getDownload } from "./utils/downloadStore";
 // transport note below), so registration must be quiet on the hot path —
 // the per-module checklist is logged only for the first instance.
 let loggedRegistration = false;
-export function createMcpServer(): McpServer {
+const loggedProfiles = new Set<ToolProfile>();
+export function createMcpServer(profile: ToolProfile = "full"): McpServer {
   try {
     const server = new McpServer({
       name: "clio-mcp",
       version: "1.2.0",
     });
+
+    // Must precede every register* call: the profile filters registration
+    // itself, so a tool outside the profile is never created at all and
+    // cannot appear in tools/list. See tools/profiles.ts.
+    applyToolProfile(server, profile);
 
     registerMatterTools(server);
     registerMatterFinancialsTools(server);
@@ -105,6 +112,10 @@ export function createMcpServer(): McpServer {
     if (!loggedRegistration) {
       loggedRegistration = true;
       console.log("[MCP] All tools registered successfully");
+    }
+    if (profile !== "full" && !loggedProfiles.has(profile)) {
+      loggedProfiles.add(profile);
+      console.log(`[MCP] Profile '${profile}' registered a restricted tool surface`);
     }
     return server;
   } catch (err: any) {
@@ -202,7 +213,15 @@ export function createApp(): express.Express {
   // fresh transport + McpServer per POST makes id collisions structurally
   // impossible. validateSession is a no-op in stateless mode, so clients that
   // still send an mcp-session-id header from an older deploy keep working.
-  app.post("/mcp", async (req: Request, res: Response) => {
+  //
+  // Two endpoints share this handler, differing only in tool profile:
+  //   POST /mcp           — the full surface (Claude, ChatGPT)
+  //   POST /mcp/readonly  — query tools only (Gemini Enterprise)
+  // Auth, identity and the Clio vault lookup are identical on both; the
+  // profile changes only which tools get registered. See tools/profiles.ts
+  // for why the URL path is the discriminator rather than the client id.
+  function mcpHandler(profile: ToolProfile) {
+    return async (req: Request, res: Response): Promise<void> => {
     const email = await authenticate(req, res);
     if (!email) return;
 
@@ -228,14 +247,18 @@ export function createApp(): express.Express {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
     });
-    const server = createMcpServer();
+    const server = createMcpServer(profile);
     res.on("close", () => {
       transport.close();
       server.close();
     });
     await server.connect(transport);
     await als.run(ctx, () => transport.handleRequest(req, res, req.body));
-  });
+    };
+  }
+
+  app.post("/mcp", mcpHandler("full"));
+  app.post("/mcp/readonly", mcpHandler("readonly"));
 
   // Stateless server: no server->client notification stream and no session to
   // tear down. 405 per the Streamable HTTP spec for unsupported methods.
@@ -248,6 +271,8 @@ export function createApp(): express.Express {
   }
   app.get("/mcp", methodNotAllowed);
   app.delete("/mcp", methodNotAllowed);
+  app.get("/mcp/readonly", methodNotAllowed);
+  app.delete("/mcp/readonly", methodNotAllowed);
 
   // --- Health Check ---
   // Reports the deployed git SHA via RAILWAY_GIT_COMMIT_SHA (Railway sets this

@@ -117,6 +117,10 @@ export function registerOAuthProxyRoutes(app: Express): void {
   app.get("/.well-known/oauth-protected-resource/mcp", protectedResourceMetadata);
   app.get("/.well-known/oauth-authorization-server", authorizationServerMetadata);
   app.get("/.well-known/oauth-authorization-server/mcp", authorizationServerMetadata);
+  // Same documents for the read-only endpoint — a client pointed at
+  // /mcp/readonly that probes the path-insertion form looks here.
+  app.get("/.well-known/oauth-protected-resource/mcp/readonly", protectedResourceMetadata);
+  app.get("/.well-known/oauth-authorization-server/mcp/readonly", authorizationServerMetadata);
 
   // POST /register — RFC 7591 Dynamic Client Registration.
   //
