@@ -6,6 +6,7 @@ import { als } from "./auth/identity";
 import { verifyMicrosoftToken, isEmailAllowed, AuthError } from "./auth/microsoft";
 import { buildUserContext, NotProvisionedError } from "./auth/vault";
 import { registerOAuthProxyRoutes } from "./auth/oauthProxy";
+import { resolveStaticApiKey } from "./auth/apiKeys";
 import { getBoxAuthorizationUrl, exchangeBoxCodeForTokens } from "./box/auth";
 import {
   getGrowAuthorizationUrl,
@@ -135,12 +136,33 @@ export function createApp(): express.Express {
   }
 
   /**
-   * Validate the Bearer JWT from the Authorization header (never `?token=`).
+   * Validate the credential from the Authorization header (never `?token=`).
    * Returns the verified, allowlisted email, or sends 401 and returns null.
+   *
+   * Two credential types, checked in that order:
+   *   1. A static API key (Bearer or X-API-Key) — only when MCP_API_KEYS is
+   *      configured; otherwise the check is a no-op and costs nothing.
+   *   2. A Microsoft-issued Bearer JWT — the OAuth path, unchanged.
+   *
+   * Both converge on the same email, so the allowlist and the per-user Clio
+   * vault lookup downstream are identical either way.
    */
   async function authenticate(req: Request, res: Response): Promise<string | null> {
     const header = req.headers.authorization;
     const token = header && header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const apiKeyHeader = req.headers["x-api-key"];
+    const presentedKey = typeof apiKeyHeader === "string" ? apiKeyHeader.trim() : token;
+
+    const principal = presentedKey ? resolveStaticApiKey(presentedKey) : null;
+    if (principal) {
+      if (!isEmailAllowed(principal.email)) {
+        console.warn("[auth] API key owner is not on the onboarding allowlist");
+        send401(res);
+        return null;
+      }
+      return principal.email;
+    }
+
     if (!token) {
       send401(res);
       return null;

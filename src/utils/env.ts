@@ -86,6 +86,33 @@ export const ENV = {
     get MCP_SCOPE_NAME() { return getEnv("MCP_SCOPE_NAME"); },
     get ALLOWED_EMAILS() { return process.env.ALLOWED_EMAILS ?? ""; },
     get ALLOWED_EMAIL_DOMAINS() { return process.env.ALLOWED_EMAIL_DOMAINS ?? ""; },
+
+    // --- OAuth facade: client registration (see auth/oauthClients.ts) ---
+    // RFC 7591 Dynamic Client Registration, used by Claude and ChatGPT to
+    // self-register. Kill-switch: set to false to stop advertising
+    // registration_endpoint, reverting connectors to a manually-entered
+    // client_id (the pre-DCR behaviour).
+    get OAUTH_DCR_ENABLED() {
+        const v = (process.env.OAUTH_DCR_ENABLED ?? "true").trim().toLowerCase();
+        return !(v === "false" || v === "0" || v === "no" || v === "off");
+    },
+    // Optional strict allowlist of redirect URIs accepted at /register. Unset
+    // = accept any https (or loopback http) URI and log it; Microsoft still
+    // rejects anything not registered on the app registration.
+    get OAUTH_ALLOWED_REDIRECT_URIS() { return process.env.OAUTH_ALLOWED_REDIRECT_URIS ?? ""; },
+    // Fixed client credentials for a client that cannot do DCR — Gemini
+    // Enterprise. Local to this server: /token verifies them and substitutes
+    // the Microsoft app credentials upstream, so Google never holds
+    // MS_CLIENT_SECRET. Generate with `npm run oauth:static-client`.
+    get MCP_STATIC_CLIENT_ID() { return process.env.MCP_STATIC_CLIENT_ID ?? ""; },
+    get MCP_STATIC_CLIENT_SECRET() { return process.env.MCP_STATIC_CLIENT_SECRET ?? ""; },
+    // Preferred over the plaintext form: store only sha256(secret) here.
+    get MCP_STATIC_CLIENT_SECRET_SHA256() { return process.env.MCP_STATIC_CLIENT_SECRET_SHA256 ?? ""; },
+    get MCP_STATIC_CLIENT_NAME() { return process.env.MCP_STATIC_CLIENT_NAME ?? "Gemini Enterprise"; },
+    // Static bearer keys for clients that skip OAuth entirely. Comma- or
+    // newline-separated `email:secret` / `email:sha256:<hex>` entries. Unset =
+    // the path is off. See auth/apiKeys.ts.
+    get MCP_API_KEYS() { return process.env.MCP_API_KEYS ?? ""; },
     // Comma-separated emails of the "owner(s)" who can set the custom RomSum/NRN
     // calendar event types. Everyone else has those inputs ignored. Calendar
     // placement/reassignment is NOT gated by this. Defaults to the original

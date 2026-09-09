@@ -70,17 +70,95 @@ curl http://localhost:3000/health
    `ALLOWED_EMAILS`/`ALLOWED_EMAIL_DOMAINS`, `CLIO_CLIENT_ID`, `CLIO_CLIENT_SECRET`, and `PUBLIC_BASE_URL`.
    Set `UPLOAD_SECRET` too if you use the [binary upload endpoint](#binary-upload-endpoint-post-upload).
 5. Deploy
-6. Test: `curl https://your-railway-url.up.railway.app/health` (expect `"transport":"streamable-http"`)
+6. Test: `curl https://your-railway-url.up.railway.app/health` (expect `"transport":"streamable-http-stateless"`)
 
-## Claude.ai Integration
+## Client Integration
 
-1. Go to Claude.ai → **Settings** → **Integrations**
-2. Click **Add MCP Server**
-3. Enter URL: `https://your-railway-url.up.railway.app/mcp`
-4. Complete the Microsoft sign-in when prompted (the connector discovers the server
-   via `/.well-known/oauth-protected-resource` and runs the OAuth flow through
-   `/authorize` + `/token`).
-5. Only allowlisted attorneys who have connected Clio on the platform can use the tools.
+The server speaks **Streamable HTTP** at `POST /mcp` (stateless; `GET`/`DELETE`
+return `405`). There is no SSE or stdio transport — that is what Gemini
+Enterprise requires, and Claude and ChatGPT accept it too.
+
+### How auth is wired
+
+This server is **not a token issuer**. Microsoft Entra is. `/authorize` and
+`/token` are a facade that forwards to Microsoft (stripping the RFC 8707
+`resource` param, which trips `AADSTS9010010`), and `/mcp` verifies the
+Microsoft-issued JWT against Microsoft's JWKS, extracts the email, and loads
+that attorney's own Clio token from the vault.
+
+Every client therefore ends up on the **same** upstream Microsoft app
+registration. What differs is only how each learns a `client_id`:
+
+| Client | Registration | Credential |
+| --- | --- | --- |
+| Claude, ChatGPT | RFC 7591 DCR at `POST /register` | Public client + PKCE, no secret |
+| Gemini Enterprise | No DCR — fixed pair configured on the server | `MCP_STATIC_CLIENT_ID` / `_SECRET`, verified locally then swapped for the Microsoft credentials |
+| Scripts, cron | None | Static bearer key (`MCP_API_KEYS`) |
+
+Endpoints: `/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource`, `/authorize`, `/token`, `/register`.
+Both well-known documents are also served with `/mcp` appended (RFC 8414 §3.1
+path-insertion form) because clients disagree on which they probe.
+
+### Claude.ai / Claude Code
+
+1. Claude.ai → **Settings** → **Connectors** → **Add custom connector**
+2. URL: `https://<PUBLIC_BASE_URL>/mcp` — nothing else to fill in
+3. Complete the Microsoft sign-in when prompted
+
+Claude discovers the server, self-registers at `/register`, and runs the
+auth-code + PKCE flow. Claude Code: `claude mcp add --transport http clio https://<PUBLIC_BASE_URL>/mcp`.
+
+### ChatGPT
+
+**Settings** → **Connectors** → **Create** → MCP Server URL
+`https://<PUBLIC_BASE_URL>/mcp`, authentication **OAuth**. Same DCR path as
+Claude; no client ID or secret to enter.
+
+### Gemini Enterprise (no DCR — static client required)
+
+Gemini cannot self-register, so mint a fixed pair first:
+
+```bash
+npm run oauth:static-client
+```
+
+Set the printed `MCP_STATIC_CLIENT_ID` and `MCP_STATIC_CLIENT_SECRET_SHA256`
+on the server and redeploy, then fill in **Custom MCP Server → OAuth 2.0**:
+
+| Field | Value |
+| --- | --- |
+| MCP Server URL | `https://<PUBLIC_BASE_URL>/mcp` |
+| Authorization URL | `https://<PUBLIC_BASE_URL>/authorize` |
+| Token URL | `https://<PUBLIC_BASE_URL>/token` |
+| Client ID | the generated `MCP_STATIC_CLIENT_ID` |
+| Client Secret | the generated secret (shown once) |
+| Scopes | `mcp.access` (your `MCP_SCOPE_NAME`) |
+| Authorization URL Parameters | leave empty |
+| PKCE | enabled (S256) |
+
+> **One manual step this cannot do for you:** copy Gemini's redirect URI out of
+> its console and add it to the Microsoft app registration (Entra ID → App
+> registrations → Authentication → Web → Redirect URIs). Microsoft rejects any
+> redirect it has not been told about, with `AADSTS50011`.
+
+The client secret is **local to this server** — it is not `MS_CLIENT_SECRET`.
+Revoking Gemini is a one-variable change, not a tenant-wide secret rotation.
+
+### Scripts and cron (no OAuth)
+
+```bash
+npm run oauth:api-key -- attorney@romanosumner.com
+```
+
+Append the printed `email:sha256:<hex>` entry to `MCP_API_KEYS`, then send the
+key as `Authorization: Bearer <key>` or `X-API-Key: <key>`. The key acts as
+that attorney and reaches exactly what they reach — the onboarding allowlist
+and their own Clio token both still apply. Unset `MCP_API_KEYS` disables the
+path entirely.
+
+In every case, only allowlisted attorneys who have connected Clio on the
+platform can actually use the tools.
 
 ## Binary Upload Endpoint (`POST /upload`)
 
