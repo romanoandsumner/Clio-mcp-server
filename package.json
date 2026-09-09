@@ -8,7 +8,9 @@
         "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/index.js --external:express --external:axios --external:dotenv --external:zod --external:zod/v4 --external:@modelcontextprotocol/sdk --external:docx --external:exceljs --external:jszip --external:form-data --external:jose --external:pg --external:multer --external:puppeteer-core",
         "start": "npm run build && node dist/index.js",
         "typecheck": "tsc --noEmit",
-        "test": "vitest run"
+        "test": "vitest run",
+        "oauth:static-client": "node scripts/generate-oauth-credentials.mjs static-client",
+        "oauth:api-key": "node scripts/generate-oauth-credentials.mjs api-key"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.12.1",

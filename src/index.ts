@@ -11,6 +11,8 @@ dotenv.config();
 import { ENV } from "./utils/env";
 import { createApp } from "./app";
 import { diagnosticToolsEnabled } from "./utils/diagnostics";
+import { getStaticClient } from "./auth/oauthClients";
+import { staticApiKeysEnabled } from "./auth/apiKeys";
 
 const BASE_URL = ENV.PUBLIC_BASE_URL.replace(/\/$/, "");
 
@@ -27,6 +29,17 @@ const httpServer = app.listen(PORT, () => {
   console.log(`  Discovery: ${BASE_URL}/.well-known/oauth-protected-resource`);
   console.log(`  Box OAuth: http://localhost:${PORT}/box/oauth/start`);
   console.log(`  Auth:      per-user Microsoft OAuth (Bearer JWT required)`);
+  // Which of the optional auth paths are actually live. Both are opt-in, and
+  // "I set the variable but it isn't working" is otherwise invisible until a
+  // client fails to connect.
+  console.log(
+    `  DCR:       ${ENV.OAUTH_DCR_ENABLED ? `enabled (${BASE_URL}/register)` : "disabled"}`
+  );
+  const staticClient = getStaticClient();
+  console.log(
+    `  Static client: ${staticClient ? `${staticClient.clientName} (${staticClient.clientId})` : "none configured"}`
+  );
+  console.log(`  API keys:  ${staticApiKeysEnabled() ? "ENABLED" : "disabled"}`);
   // Boot-visible so a mistyped flag value is diagnosable from deploy logs
   // instead of silently hiding the probe tools.
   console.log(
