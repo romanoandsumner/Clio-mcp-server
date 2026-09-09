@@ -89,9 +89,25 @@ export function isStaticClientId(clientId: string): boolean {
  */
 export function verifyStaticClientSecret(presented: string): boolean {
   if (!getStaticClient()) return false;
-  const hash = ENV.MCP_STATIC_CLIENT_SECRET_SHA256.trim();
-  if (hash) return secretMatchesHash(presented, hash);
-  return secretMatches(presented, ENV.MCP_STATIC_CLIENT_SECRET);
+  const hash = ENV.MCP_STATIC_CLIENT_SECRET_SHA256;
+  const ok = hash
+    ? secretMatchesHash(presented, hash)
+    : secretMatches(presented, ENV.MCP_STATIC_CLIENT_SECRET);
+
+  if (!ok) {
+    // Lengths, never values. For a high-entropy secret the length leaks
+    // nothing useful, and it separates failure modes that look identical from
+    // outside: unequal lengths mean stray whitespace or truncation, a
+    // presented length of 0 means the client sent nothing, equal lengths mean
+    // genuinely different secrets, and mode=sha256 when the operator expected
+    // plaintext means the _SHA256 var is silently overriding it.
+    const configuredLen = hash ? hash.length : ENV.MCP_STATIC_CLIENT_SECRET.length;
+    console.warn(
+      `[oauth] static client secret mismatch: mode=${hash ? "sha256" : "plaintext"} ` +
+        `presented_len=${presented.length} configured_len=${configuredLen}`
+    );
+  }
+  return ok;
 }
 
 /**
