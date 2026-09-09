@@ -104,10 +104,15 @@ export const ENV = {
     // Enterprise. Local to this server: /token verifies them and substitutes
     // the Microsoft app credentials upstream, so Google never holds
     // MS_CLIENT_SECRET. Generate with `npm run oauth:static-client`.
-    get MCP_STATIC_CLIENT_ID() { return process.env.MCP_STATIC_CLIENT_ID ?? ""; },
-    get MCP_STATIC_CLIENT_SECRET() { return process.env.MCP_STATIC_CLIENT_SECRET ?? ""; },
+    // All three are trimmed. Pasting into a dashboard field routinely captures
+    // a trailing newline or space; untrimmed, the (trimmed) client id still
+    // matches while the secret does not, so the only symptom is a bare
+    // "invalid client_secret" with values that look identical on both sides.
+    // Hit for real on the courtlistener-mcp port of this code, 2026-09-09.
+    get MCP_STATIC_CLIENT_ID() { return (process.env.MCP_STATIC_CLIENT_ID ?? "").trim(); },
+    get MCP_STATIC_CLIENT_SECRET() { return (process.env.MCP_STATIC_CLIENT_SECRET ?? "").trim(); },
     // Preferred over the plaintext form: store only sha256(secret) here.
-    get MCP_STATIC_CLIENT_SECRET_SHA256() { return process.env.MCP_STATIC_CLIENT_SECRET_SHA256 ?? ""; },
+    get MCP_STATIC_CLIENT_SECRET_SHA256() { return (process.env.MCP_STATIC_CLIENT_SECRET_SHA256 ?? "").trim(); },
     get MCP_STATIC_CLIENT_NAME() { return process.env.MCP_STATIC_CLIENT_NAME ?? "Gemini Enterprise"; },
     // Static bearer keys for clients that skip OAuth entirely. Comma- or
     // newline-separated `email:secret` / `email:sha256:<hex>` entries. Unset =

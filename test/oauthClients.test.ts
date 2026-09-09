@@ -96,6 +96,29 @@ describe("static (non-DCR) client", () => {
     expect(verifyStaticClientSecret("stale-plaintext")).toBe(false);
   });
 
+  // Regression: pasting into a dashboard field captures a trailing newline.
+  // The client id was trimmed and the secret was not, so the id matched, the
+  // secret did not, and the only symptom was "invalid client_secret" with
+  // values that looked identical on both sides. Hit for real on the
+  // courtlistener-mcp port of this code, 2026-09-09.
+  it("tolerates trailing whitespace on the configured id and secret", () => {
+    process.env.MCP_STATIC_CLIENT_ID = "gemini-abc123\n";
+    process.env.MCP_STATIC_CLIENT_SECRET = "top-secret-value\n";
+    expect(isStaticClientId("gemini-abc123")).toBe(true);
+    expect(verifyStaticClientSecret("top-secret-value")).toBe(true);
+
+    process.env.MCP_STATIC_CLIENT_SECRET = "  top-secret-value  ";
+    expect(verifyStaticClientSecret("top-secret-value")).toBe(true);
+    // A genuinely wrong secret must still fail.
+    expect(verifyStaticClientSecret("top-secret-valuex")).toBe(false);
+  });
+
+  it("treats a whitespace-only secret as unset, disabling the client", () => {
+    process.env.MCP_STATIC_CLIENT_ID = "gemini-abc123";
+    process.env.MCP_STATIC_CLIENT_SECRET = "   ";
+    expect(getStaticClient()).toBeNull();
+  });
+
   // Setting the static id to the upstream app id would hand every DCR client
   // (which holds no secret) a client_id that suddenly requires one — Claude
   // and ChatGPT would start failing /token with invalid_client.
