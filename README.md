@@ -78,6 +78,33 @@ The server speaks **Streamable HTTP** at `POST /mcp` (stateless; `GET`/`DELETE`
 return `405`). There is no SSE or stdio transport — that is what Gemini
 Enterprise requires, and Claude and ChatGPT accept it too.
 
+### Tool profiles: two endpoints, one server
+
+| Endpoint | Tools | For |
+| --- | --- | --- |
+| `POST /mcp` | 143 (full surface) | Claude, ChatGPT |
+| `POST /mcp/readonly` | 77 (query tools only) | Gemini Enterprise |
+
+Auth, identity and the Clio vault lookup are identical on both — only the
+registered tool set differs (`src/tools/profiles.ts`).
+
+`/mcp/readonly` exists because Gemini Enterprise caps a data store at **100
+enabled actions**, fewer than the full surface, and defaults to demanding
+per-call user confirmation on the assumption that any action may mutate data.
+Hand-picking a subset in Google's console works but is invisible, unversioned,
+and drifts silently as tools are added. Pointing Gemini at `/mcp/readonly`
+instead means it never sees a write tool, lands under the cap automatically
+(77, leaving 23 spare), and skips the confirmation friction for reads.
+
+Classification is by name prefix — `get_`, `list_`, `search_`, `find_`,
+`compare_`, `audit_`, plus `who_am_i`/`grow_who_am_i` — not a hardcoded list,
+so a new query tool is included automatically. Excluded on purpose:
+`download_*`/`generate_*` return a URL to a generated file that a remote
+client cannot fetch; everything mutating; and the `ENABLE_DIAGNOSTIC_TOOLS`
+probes. `test/toolProfiles.test.ts` fails if the read surface ever exceeds 100,
+if a mutating verb leaks in, or if a newly added tool matches no known naming
+convention.
+
 ### How auth is wired
 
 This server is **not a token issuer**. Microsoft Entra is. `/authorize` and
@@ -128,7 +155,7 @@ on the server and redeploy, then fill in **Custom MCP Server → OAuth 2.0**:
 
 | Field | Value |
 | --- | --- |
-| MCP Server URL | `https://<PUBLIC_BASE_URL>/mcp` |
+| MCP Server URL | `https://<PUBLIC_BASE_URL>/mcp/readonly` — **not** `/mcp`; see [Tool profiles](#tool-profiles-two-endpoints-one-server) |
 | Authorization URL | `https://<PUBLIC_BASE_URL>/authorize` |
 | Token URL | `https://<PUBLIC_BASE_URL>/token` |
 | Client ID | the generated `MCP_STATIC_CLIENT_ID` |
@@ -141,6 +168,14 @@ on the server and redeploy, then fill in **Custom MCP Server → OAuth 2.0**:
 > its console and add it to the Microsoft app registration (Entra ID → App
 > registrations → Authentication → Web → Redirect URIs). Microsoft rejects any
 > redirect it has not been told about, with `AADSTS50011`.
+
+After the connection is saved, tools do **not** appear until you enable them.
+Gemini imports every tool as an "action" and leaves them all off. In Gemini
+Enterprise – Business edition: **Settings & help** → your Team → **Manage
+team** → **Connected apps** → your MCP server → **Actions** → **Reload Custom
+Actions**, then select and **Enable actions**. (On the Cloud-console edition:
+**Data Stores** → your data store → **Actions**.) Pointed at `/mcp/readonly`
+the import is 77 actions, so all of them fit under the 100 cap.
 
 The client secret is **local to this server** — it is not `MS_CLIENT_SECRET`.
 Revoking Gemini is a one-variable change, not a tenant-wide secret rotation.

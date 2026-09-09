@@ -26,6 +26,7 @@ const httpServer = app.listen(PORT, () => {
   console.log(`Clio MCP Server running on port ${PORT}`);
   console.log(`  Health:    http://localhost:${PORT}/health`);
   console.log(`  MCP:       http://localhost:${PORT}/mcp (Streamable HTTP, stateless)`);
+  console.log(`  MCP (RO):  http://localhost:${PORT}/mcp/readonly (query tools only)`);
   console.log(`  Discovery: ${BASE_URL}/.well-known/oauth-protected-resource`);
   console.log(`  Box OAuth: http://localhost:${PORT}/box/oauth/start`);
   console.log(`  Auth:      per-user Microsoft OAuth (Bearer JWT required)`);
