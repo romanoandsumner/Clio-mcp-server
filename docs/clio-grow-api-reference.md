@@ -39,13 +39,30 @@ flow — distinct from both Clio Identity/SSO and the legacy Manage API:
   not exist". US host shown; other regions may use a prefixed host.
 - **`client_id` is the app's App Key** (distinct from the App ID shown in the
   portal's app list). App Secret is the client secret.
-- **Scopes are Grow-specific** — the full set this server's tools exercise (and
-  the `GROW_OAUTH_SCOPE` default) is: `grow_lead_inbox_read`,
-  `grow_lead_inbox_all_read`,
-  `grow_lead_inbox_write`, `grow_custom_action_read`, `grow_custom_action_write`,
-  `grow_matter_read`, `grow_matter_note_read`, `grow_matter_note_write`,
-  `grow_contact_read`, `grow_contact_note_read`, `grow_contact_note_write`,
-  `grow_user_read`. Note that notes are gated by their own
+- **Scopes are Grow-specific.** The `GROW_OAUTH_SCOPE` default is the complete
+  set of 17 scopes the portal offers, transcribed from the portal's own Grow
+  scopes table (which publishes the exact scope string per permission row):
+
+  | Portal permission | Read scope | Write scope |
+  | --- | --- | --- |
+  | Lead inbox | `grow_lead_inbox_read` | `grow_lead_inbox_write` |
+  | Lead inbox (all leads) | `grow_lead_inbox_all_read` | — |
+  | Custom actions | `grow_custom_action_read` | `grow_custom_action_write` |
+  | Custom fields | `grow_custom_field_read` | — |
+  | Locations | `grow_location_read` | `grow_location_write` |
+  | Matters | `grow_matter_read` | — |
+  | Matter notes | `grow_matter_note_read` | `grow_matter_note_write` |
+  | Matter types | `grow_matter_type_read` | `grow_matter_type_write` |
+  | Contacts | `grow_contact_read` | — |
+  | Contact notes | `grow_contact_note_read` | `grow_contact_note_write` |
+  | Users | `grow_user_read` | — |
+
+  Clio offers **no** write scope for Matters, Contacts, Custom fields, Users, or
+  Lead inbox (all leads) — those rows are read-only, so the full set grants no
+  mutation rights over client matter or contact records. No tool currently
+  exercises `grow_custom_field_read`, `grow_location_*`, or `grow_matter_type_*`;
+  they are requested so the token is not the limiting factor when one is added.
+  Note that notes are gated by their own
   `grow_{matter,contact}_note_*` scopes (not the parent read scope) and custom
   actions by `grow_custom_action_*` — requesting only the parent read scopes
   leaves the note/write/custom-action tools failing with an auth-host redirect.

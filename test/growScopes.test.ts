@@ -71,6 +71,60 @@ describe("growScopeReport", () => {
   });
 });
 
+describe("GROW_OAUTH_SCOPE default", () => {
+  beforeEach(() => {
+    delete process.env.GROW_OAUTH_SCOPE; // fall through to the built-in default
+  });
+
+  /** The complete portal set, transcribed from the portal's published table. */
+  const PORTAL_SCOPES = [
+    "grow_lead_inbox_read",
+    "grow_lead_inbox_all_read",
+    "grow_lead_inbox_write",
+    "grow_custom_action_read",
+    "grow_custom_action_write",
+    "grow_custom_field_read",
+    "grow_location_read",
+    "grow_location_write",
+    "grow_matter_read",
+    "grow_matter_note_read",
+    "grow_matter_note_write",
+    "grow_matter_type_read",
+    "grow_matter_type_write",
+    "grow_contact_read",
+    "grow_contact_note_read",
+    "grow_contact_note_write",
+    "grow_user_read",
+  ];
+
+  it("requests every scope the portal offers, and nothing invented", () => {
+    const requested = growScopeReport(undefined).requested_scope;
+    expect([...requested].sort()).toEqual([...PORTAL_SCOPES].sort());
+    expect(requested).toHaveLength(17);
+  });
+
+  it("requests no write scope Clio does not offer", () => {
+    // These rows are read-only in the portal; sending them fails the whole
+    // authorize call with invalid_scope.
+    const requested = growScopeReport(undefined).requested_scope;
+    for (const nonexistent of [
+      "grow_matter_write",
+      "grow_contact_write",
+      "grow_custom_field_write",
+      "grow_user_write",
+      "grow_lead_inbox_all_write",
+    ]) {
+      expect(requested).not.toContain(nonexistent);
+    }
+  });
+
+  it("keeps grow_lead_inbox_read alongside grow_lead_inbox_all_read", () => {
+    const requested = growScopeReport(undefined).requested_scope;
+    expect(requested).toContain("grow_lead_inbox_read");
+    expect(requested).toContain("grow_lead_inbox_all_read");
+  });
+});
+
 describe("growScopeReport — grow_lead_inbox_all_read", () => {
   beforeEach(() => {
     process.env.GROW_OAUTH_SCOPE = "grow_lead_inbox_read grow_lead_inbox_all_read";

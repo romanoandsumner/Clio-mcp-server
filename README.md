@@ -385,3 +385,17 @@ as before. Existing tokens do **not** gain the scope retroactively —
 `lead_inbox_all_note` telling you to reconnect at `/grow/oauth/start`. The
 permission must also be selected on the app in the Clio developer portal before
 anyone reauthorizes.
+
+### 2026-09-10 — Grow scopes: request the complete portal set (17)
+Expanded the default `GROW_OAUTH_SCOPE` from 12 to all 17 scopes the Clio Grow
+developer portal offers, transcribed from the portal's published scope table
+rather than inferred from naming convention. Newly requested:
+`grow_custom_field_read`, `grow_location_read`, `grow_location_write`,
+`grow_matter_type_read`, `grow_matter_type_write`. No tool exercises these yet;
+they are requested so the token is not the limiting factor when one is added.
+
+Clio offers **no** write scope for Matters, Contacts, Custom fields, Users, or
+Lead inbox (all leads) — those rows are read-only, so this grants no mutation
+rights over client matter or contact records. Requires the matching App
+Permissions to be selected on the app in the portal, and a reconnect at
+`/grow/oauth/start`; existing tokens keep the scopes they were consented for.

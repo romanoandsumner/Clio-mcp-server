@@ -60,9 +60,21 @@ export const ENV = {
     // (Note: notes are gated by note-specific scopes, not the parent read scope,
     // and custom actions by their own scope — the previous 4-read-scope default
     // left the write/note/custom-action tools failing with an auth-host redirect.)
+    //
+    // As of 2026-09-10 this default is the COMPLETE set of 17 scopes the Grow
+    // portal offers, transcribed from the portal's own Grow scopes table (which
+    // publishes the exact read/write scope string per permission row) — not
+    // inferred from naming convention. No tool currently exercises the last five;
+    // they are requested so the token isn't the limiting factor when one is added:
+    //   - grow_custom_field_read       → (no tool yet; read-only, no write offered)
+    //   - grow_location_read/_write    → (no tool yet)
+    //   - grow_matter_type_read/_write → (no tool yet)
+    // Clio offers NO write scope for Matters, Contacts, Custom fields, Users, or
+    // Lead inbox (all leads) — those rows are read-only in the portal, so this set
+    // grants no mutation rights over client matter or contact records.
     get GROW_OAUTH_SCOPE() {
         return process.env.GROW_OAUTH_SCOPE ??
-            "grow_lead_inbox_read grow_lead_inbox_all_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read";
+            "grow_lead_inbox_read grow_lead_inbox_all_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_custom_field_read grow_location_read grow_location_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_matter_type_read grow_matter_type_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read";
     },
     // PKCE (S256). Clio's Platform app has an optional "Use PKCE" toggle. Set
     // GROW_OAUTH_PKCE to match that toggle: on by default (sending a code_challenge
