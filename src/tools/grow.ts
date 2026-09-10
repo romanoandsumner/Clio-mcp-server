@@ -108,13 +108,31 @@ export function readTokenScopes(token: string | undefined): string[] | null {
  * re-consent at /grow/oauth/start would add — the direct explanation for a 403
  * on a note/custom-action endpoint. `token_scope` is null for opaque tokens.
  */
+export const GROW_LEAD_INBOX_ALL_READ = "grow_lead_inbox_all_read";
+
+/**
+ * One-line reauthorization nudge for the lead-inbox-all scope. Added 2026-09:
+ * without it, inbox leads submitted by other apps come back with
+ * `inbox_lead_id` in `redacted_fields` rather than erroring, so the gap is
+ * invisible. Surfaced whenever the scope is requested but the stored token
+ * either lacks it or is opaque (can't be checked).
+ */
+const LEAD_INBOX_ALL_REAUTH_NOTE =
+  `Reauthorize at /grow/oauth/start — the stored token is missing ${GROW_LEAD_INBOX_ALL_READ}, so inbox leads submitted by other applications return with inbox_lead_id in redacted_fields instead of populated.`;
+
 export function growScopeReport(token: string | undefined) {
   const requested = (ENV.GROW_OAUTH_SCOPE ?? "").split(/\s+/).filter(Boolean);
   const granted = readTokenScopes(token);
+  const missing = granted === null ? null : requested.filter((s) => !granted.includes(s));
+  // Requested-but-unconfirmed: either explicitly absent, or unknowable (opaque).
+  const leadInboxAllUnconfirmed =
+    requested.includes(GROW_LEAD_INBOX_ALL_READ) &&
+    (granted === null || !granted.includes(GROW_LEAD_INBOX_ALL_READ));
   return {
     requested_scope: requested,
     token_scope: granted,
-    missing_scope: granted === null ? null : requested.filter((s) => !granted.includes(s)),
+    missing_scope: missing,
+    ...(leadInboxAllUnconfirmed ? { lead_inbox_all_note: LEAD_INBOX_ALL_REAUTH_NOTE } : {}),
     ...(granted === null
       ? {
           scope_note:
@@ -165,7 +183,7 @@ export function registerGrowTools(server: McpServer): void {
   // OAuth app; this tool proves out the token against Grow in one call.
   server.tool(
     "grow_who_am_i",
-    "Verify Clio Grow API access and return the current Grow user + firm (GET /users/who_am_i on the Grow API). Reports token_source: 'grow_oauth' (you connected the Grow Platform app at /grow/oauth/start) or 'manage_fallback' (no Grow tokens stored; trying the Manage token), plus a scopes block (requested_scope vs the token's actual token_scope, and missing_scope). Use this FIRST if any other grow_* tool errors — a 401/403 with manage_fallback means you need to connect at /grow/oauth/start; a non-empty missing_scope means the stored token predates a scope change and you must reconnect to re-consent.",
+    "Verify Clio Grow API access and return the current Grow user + firm (GET /users/who_am_i on the Grow API). Reports token_source: 'grow_oauth' (you connected the Grow Platform app at /grow/oauth/start) or 'manage_fallback' (no Grow tokens stored; trying the Manage token), plus a scopes block (requested_scope vs the token's actual token_scope, and missing_scope). Use this FIRST if any other grow_* tool errors — a 401/403 with manage_fallback means you need to connect at /grow/oauth/start; a non-empty missing_scope means the stored token predates a scope change and you must reconnect to re-consent. A lead_inbox_all_note in the scopes block means the token lacks grow_lead_inbox_all_read, so inbox leads submitted by other applications come back with inbox_lead_id redacted.",
     {},
     async () => {
       let tokenSource: string | undefined;

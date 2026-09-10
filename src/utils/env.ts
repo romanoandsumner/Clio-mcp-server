@@ -41,6 +41,16 @@ export const ENV = {
     // those exactly. The default now covers every scope the Grow tools exercise so
     // the read AND write tools work out of the box:
     //   - grow_lead_inbox_read/_write  → get/create_grow_inbox_lead
+    //   - grow_lead_inbox_all_read     → inbox leads submitted by ANY app on the
+    //     account (firm website form, another connected app, manual entry), not
+    //     just the ones this app submitted. Added 2026-09 per Clio's release of
+    //     the scope on 2026-09-02. Opt-in and backward-compatible: without it the
+    //     Grow API still returns those records, but with `inbox_lead_id` listed in
+    //     `redacted_fields` instead of populated — a silent blind spot. Existing
+    //     stored tokens do NOT gain it retroactively; each user must reconnect at
+    //     /grow/oauth/start. NOTE: this scope must also be selected in the app's
+    //     App Permissions in the developer portal, or the authorize call fails
+    //     for everyone with invalid_scope.
     //   - grow_custom_action_read/_write → get/create/delete_grow_custom_action
     //   - grow_matter_read             → get_grow_matters
     //   - grow_matter_note_read/_write → get/create_grow_note (matter)
@@ -52,7 +62,7 @@ export const ENV = {
     // left the write/note/custom-action tools failing with an auth-host redirect.)
     get GROW_OAUTH_SCOPE() {
         return process.env.GROW_OAUTH_SCOPE ??
-            "grow_lead_inbox_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read";
+            "grow_lead_inbox_read grow_lead_inbox_all_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read";
     },
     // PKCE (S256). Clio's Platform app has an optional "Use PKCE" toggle. Set
     // GROW_OAUTH_PKCE to match that toggle: on by default (sending a code_challenge

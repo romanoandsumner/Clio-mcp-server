@@ -40,7 +40,7 @@ describe("getGrowAuthorizationUrl", () => {
     // Grow uses Grow-specific scopes (not openid); default covers every scope
     // the Grow tools exercise — read AND write, incl. note + custom-action scopes.
     expect(url.searchParams.get("scope")).toBe(
-      "grow_lead_inbox_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read"
+      "grow_lead_inbox_read grow_lead_inbox_all_read grow_lead_inbox_write grow_custom_action_read grow_custom_action_write grow_matter_read grow_matter_note_read grow_matter_note_write grow_contact_read grow_contact_note_read grow_contact_note_write grow_user_read"
     );
     // PKCE S256 challenge is present and well-formed (base64url, no padding).
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");

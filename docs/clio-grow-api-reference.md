@@ -41,6 +41,7 @@ flow — distinct from both Clio Identity/SSO and the legacy Manage API:
   portal's app list). App Secret is the client secret.
 - **Scopes are Grow-specific** — the full set this server's tools exercise (and
   the `GROW_OAUTH_SCOPE` default) is: `grow_lead_inbox_read`,
+  `grow_lead_inbox_all_read`,
   `grow_lead_inbox_write`, `grow_custom_action_read`, `grow_custom_action_write`,
   `grow_matter_read`, `grow_matter_note_read`, `grow_matter_note_write`,
   `grow_contact_read`, `grow_contact_note_read`, `grow_contact_note_write`,
@@ -48,6 +49,13 @@ flow — distinct from both Clio Identity/SSO and the legacy Manage API:
   `grow_{matter,contact}_note_*` scopes (not the parent read scope) and custom
   actions by `grow_custom_action_*` — requesting only the parent read scopes
   leaves the note/write/custom-action tools failing with an auth-host redirect.
+  `grow_lead_inbox_all_read` (released by Clio 2026-09-02) is the opt-in widening
+  of `grow_lead_inbox_read`: without it, inbox-lead reads cover only leads this
+  app submitted, and leads that arrived through another channel (firm website
+  form, another connected app, manual entry) are returned with `inbox_lead_id`
+  listed in `redacted_fields` rather than erroring. It does not replace
+  `grow_lead_inbox_read` — both are requested together. Existing stored tokens do
+  not gain it retroactively; each user must reconnect at `/grow/oauth/start`.
   Do NOT send `openid`/`offline_access`; a `refresh_token` is returned
   automatically. The requested scopes must be a subset of the app's selected App
   Permissions.
