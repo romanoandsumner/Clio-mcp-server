@@ -64,4 +64,41 @@ describe("growScopeReport", () => {
     expect(report.missing_scope).toBeNull();
     expect(report.scope_note).toContain("/grow/oauth/start");
   });
+
+  it("omits the lead-inbox-all note when the scope isn't requested at all", () => {
+    const report = growScopeReport(jwt({ scp: ["grow_contact_read"] }));
+    expect(report).not.toHaveProperty("lead_inbox_all_note");
+  });
+});
+
+describe("growScopeReport — grow_lead_inbox_all_read", () => {
+  beforeEach(() => {
+    process.env.GROW_OAUTH_SCOPE = "grow_lead_inbox_read grow_lead_inbox_all_read";
+  });
+
+  it("requests the all-read scope alongside (not instead of) grow_lead_inbox_read", () => {
+    const report = growScopeReport(jwt({ scp: [] }));
+    expect(report.requested_scope).toContain("grow_lead_inbox_read");
+    expect(report.requested_scope).toContain("grow_lead_inbox_all_read");
+  });
+
+  it("flags a legacy token that predates the scope and names the reauth path", () => {
+    const report = growScopeReport(jwt({ scp: ["grow_lead_inbox_read"] }));
+    expect(report.missing_scope).toEqual(["grow_lead_inbox_all_read"]);
+    expect(report.lead_inbox_all_note).toContain("/grow/oauth/start");
+    expect(report.lead_inbox_all_note).toContain("redacted_fields");
+  });
+
+  it("drops the note once the token carries the scope", () => {
+    const report = growScopeReport(
+      jwt({ scp: ["grow_lead_inbox_read", "grow_lead_inbox_all_read"] })
+    );
+    expect(report.missing_scope).toEqual([]);
+    expect(report).not.toHaveProperty("lead_inbox_all_note");
+  });
+
+  it("still notes the scope when the token is opaque and can't be checked", () => {
+    const report = growScopeReport("opaque-token");
+    expect(report.lead_inbox_all_note).toContain("grow_lead_inbox_all_read");
+  });
 });

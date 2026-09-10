@@ -367,3 +367,21 @@ which token was used (`token_source`) and diagnoses 401/403s.
 | **Token not refreshing** | Verify `CLIO_CLIENT_ID`/`CLIO_CLIENT_SECRET` match the platform's Clio app; refreshed tokens are written back to the vault. |
 | **`set_config`/RLS returns no rows** | Connect as the bounded `noe_app` role (not the superuser); the tenant context is set per transaction automatically. |
 | **Railway env vars** | Railway ignores `.env` files — set every variable in the Railway dashboard |
+
+## Changelog
+
+### 2026-09-10 — Grow scope: `grow_lead_inbox_all_read`
+Added Clio's `grow_lead_inbox_all_read` scope (released 2026-09-02) to the
+default `GROW_OAUTH_SCOPE`, requested **alongside** the unchanged
+`grow_lead_inbox_read`. It widens inbox-lead reads from "leads this app
+submitted" to "leads submitted by any application on the account" (firm website
+form, another connected app, manual entry). Without it, those records still come
+back — but with `inbox_lead_id` in `redacted_fields` instead of populated, so the
+gap is silent.
+
+Not a breaking change: accounts that have not reauthorized keep working exactly
+as before. Existing tokens do **not** gain the scope retroactively —
+`grow_who_am_i` now lists it under `missing_scope` and emits a
+`lead_inbox_all_note` telling you to reconnect at `/grow/oauth/start`. The
+permission must also be selected on the app in the Clio developer portal before
+anyone reauthorizes.
