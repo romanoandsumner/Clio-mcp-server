@@ -64,11 +64,15 @@ export const ENV = {
     // As of 2026-09-10 this default is the COMPLETE set of 17 scopes the Grow
     // portal offers, transcribed from the portal's own Grow scopes table (which
     // publishes the exact read/write scope string per permission row) — not
-    // inferred from naming convention. No tool currently exercises the last five;
-    // they are requested so the token isn't the limiting factor when one is added:
-    //   - grow_custom_field_read       → (no tool yet; read-only, no write offered)
-    //   - grow_location_read/_write    → (no tool yet)
-    //   - grow_matter_type_read/_write → (no tool yet)
+    // inferred from naming convention:
+    //   - grow_custom_field_read       → include_custom_fields on matters/contacts
+    //   - grow_location_read           → get_grow_locations (_write: no tool yet)
+    //   - grow_matter_type_read        → get_grow_matter_types (_write: no tool yet)
+    // The grow_ PREFIX IS CORRECT here even though the API's 403 bodies name the
+    // scope without it ("requires scope \"location_read\""). Do not strip it to
+    // match the error text — the prefixed names are what the authorize endpoint
+    // accepts, and the endpoints gated by grow_user_read/grow_contact_read work
+    // today on exactly these strings.
     // Clio offers NO write scope for Matters, Contacts, Custom fields, Users, or
     // Lead inbox (all leads) — those rows are read-only in the portal, so this set
     // grants no mutation rights over client matter or contact records.

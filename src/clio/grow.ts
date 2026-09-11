@@ -201,6 +201,26 @@ export async function growFetchAllPages<T>(
   return results;
 }
 
+/**
+ * growFetchAllPages with an exact truncation signal: overfetches one row past
+ * `maxResults` so the caller can tell "there were exactly this many" from
+ * "there are more". A caller that can't distinguish those silently reports a
+ * partial list as complete. `maxResults` undefined means every page.
+ */
+export async function growFetchCapped<T>(
+  url: string,
+  params: Record<string, any> = {},
+  maxResults?: number
+): Promise<{ rows: T[]; truncated: boolean }> {
+  if (maxResults === undefined) {
+    return { rows: await growFetchAllPages<T>(url, params), truncated: false };
+  }
+  const rows = await growFetchAllPages<T>(url, params, maxResults + 1);
+  return rows.length > maxResults
+    ? { rows: rows.slice(0, maxResults), truncated: true }
+    : { rows, truncated: false };
+}
+
 function logGrowWrite(method: string, path: string, outcome: string): void {
   const ctx = getContext();
   console.log(formatClioWriteLog(method, `grow:${path}`, ctx?.userEmail, ctx?.clioIdentity, outcome));

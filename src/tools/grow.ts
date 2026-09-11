@@ -4,6 +4,7 @@ import { ENV } from "../utils/env";
 import {
   growGetSingle,
   growFetchAllPages,
+  growFetchCapped,
   growPostSingle,
   growDeleteSingle,
   resolveGrowBearer,
@@ -14,6 +15,14 @@ import {
 // its contacts/matters are intake-pipeline records that carry a `clio_id`
 // pointing at the synced Clio Manage record, which is the join key back to the
 // Manage tools in the rest of this server.
+
+// Default page cap for Grow list endpoints. Grow accounts accumulate intake
+// records indefinitely (a mid-size firm carries thousands of contacts and
+// matters), and "every page" is not a usable default at that size: /contacts
+// returned 3.4MB and blew the response budget, /matters 504'd at the gateway
+// before the walk finished. Capping by default makes the common call succeed
+// and makes the incomplete case visible via `truncated` rather than silent.
+const GROW_DEFAULT_MAX_RESULTS = 200;
 
 // Shared list-filter inputs (Grow supports these on every list endpoint).
 const sinceFilters = {
@@ -32,7 +41,9 @@ const sinceFilters = {
   max_results: z
     .number()
     .optional()
-    .describe("Cap the number of returned rows (default: all pages)"),
+    .describe(
+      `Cap the number of returned rows (default: ${GROW_DEFAULT_MAX_RESULTS}). Pass a higher number to widen; narrow with created_since/updated_since/query instead of raising this on a large account.`
+    ),
 };
 
 // `ids` is applied client-side (filterByIds) - Grow expects repeated ids[]
@@ -117,7 +128,12 @@ export function readTokenScopes(token: string | undefined): string[] | null {
     const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
     if (Array.isArray(payload.scp)) return payload.scp.map(String);
     if (typeof payload.scope === "string") return payload.scope.split(/\s+/).filter(Boolean);
-    return [];
+    // A JWT carrying NEITHER claim tells us nothing about what was granted —
+    // Hydra can be configured to keep scopes out of the access token. Returning
+    // [] here would read as "zero scopes granted" and report every requested
+    // scope as missing, which is how this reported a fully working token as
+    // having lost all 17 scopes. "Can't tell" is null, same as an opaque token.
+    return null;
   } catch {
     return null;
   }
@@ -157,7 +173,41 @@ export function growScopeReport(token: string | undefined) {
     ...(granted === null
       ? {
           scope_note:
-            "The stored access token is opaque (not a JWT), so its granted scopes can't be read here. If a grow_* endpoint returns 403 after deploying new scopes, reconnect at /grow/oauth/start — existing tokens keep the scopes they were consented for.",
+            "The stored access token does not state its granted scopes (it is opaque, or a JWT with no scp/scope claim), so they can't be read here — an empty missing_scope is not a clean bill of health, and a 403 is the only reliable signal. If a grow_* endpoint returns 403 naming a scope, reconnect at /grow/oauth/start: existing tokens keep the scopes they were consented for and do not gain newly requested ones. Note the API names scopes WITHOUT the grow_ prefix (a 403 for \"location_read\" means the grow_location_read consent is missing).",
+        }
+      : {}),
+  };
+}
+
+/**
+ * Shared list fetch: applies the default cap, the client-side ids[] filter, and
+ * a `truncated` flag. Returns fields meant to be spread into an ok() body.
+ *
+ * An explicit ids[] filter deliberately opts out of the default cap: ids are
+ * matched client-side, so a cap could stop paging before the requested ids are
+ * reached and return an empty list for records that exist. An explicit
+ * max_results still applies — the caller asked for it.
+ */
+export function resolveGrowCap(max_results?: number, ids?: number[]): number | undefined {
+  if (max_results !== undefined) return max_results;
+  return ids?.length ? undefined : GROW_DEFAULT_MAX_RESULTS;
+}
+
+async function growList(
+  path: string,
+  params: Record<string, any>,
+  opts: { max_results?: number; ids?: number[] }
+): Promise<{ count: number; rows: any[]; truncated?: true; truncation_note?: string }> {
+  const cap = resolveGrowCap(opts.max_results, opts.ids);
+  const { rows, truncated } = await growFetchCapped<any>(path, params, cap);
+  const filtered = filterByIds(rows, opts.ids);
+  return {
+    count: filtered.length,
+    rows: filtered,
+    ...(truncated
+      ? {
+          truncated: true as const,
+          truncation_note: `More rows exist beyond this ${cap}-row cap. Narrow with created_since/updated_since (or query, where supported) rather than raising max_results — the full set can exceed the response budget or time out the Grow gateway.`,
         }
       : {}),
   };
@@ -270,11 +320,8 @@ export function registerGrowTools(server: McpServer): void {
         }
         const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (query) params.query = query;
-        const rows = filterByIds(
-          await growFetchAllPages<any>("/contacts", params, max_results),
-          ids
-        );
-        return ok({ count: rows.length, contacts: rows });
+        const { rows, ...meta } = await growList("/contacts", params, { max_results, ids });
+        return ok({ ...meta, contacts: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -301,11 +348,8 @@ export function registerGrowTools(server: McpServer): void {
         const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (inbox_lead_id) params.inbox_lead_id = inbox_lead_id;
         if (submitted_only !== undefined) params.submitted_only = submitted_only;
-        const rows = filterByIds(
-          await growFetchAllPages<any>("/matters", params, max_results),
-          ids
-        );
-        return ok({ count: rows.length, matters: rows });
+        const { rows, ...meta } = await growList("/matters", params, { max_results, ids });
+        return ok({ ...meta, matters: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -325,15 +369,12 @@ export function registerGrowTools(server: McpServer): void {
           const res = await growGetSingle(`/matter_types/${matter_type_id}`);
           return ok({ matter_type: res?.data ?? res });
         }
-        const rows = filterByIds(
-          await growFetchAllPages<any>(
-            "/matter_types",
-            growListParams({ created_since, updated_since }),
-            max_results
-          ),
-          ids
+        const { rows, ...meta } = await growList(
+          "/matter_types",
+          growListParams({ created_since, updated_since }),
+          { max_results, ids }
         );
-        return ok({ count: rows.length, matter_types: rows });
+        return ok({ ...meta, matter_types: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -353,15 +394,12 @@ export function registerGrowTools(server: McpServer): void {
           const res = await growGetSingle(`/locations/${location_id}`);
           return ok({ location: res?.data ?? res });
         }
-        const rows = filterByIds(
-          await growFetchAllPages<any>(
-            "/locations",
-            growListParams({ created_since, updated_since }),
-            max_results
-          ),
-          ids
+        const { rows, ...meta } = await growList(
+          "/locations",
+          growListParams({ created_since, updated_since }),
+          { max_results, ids }
         );
-        return ok({ count: rows.length, locations: rows });
+        return ok({ ...meta, locations: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -380,8 +418,8 @@ export function registerGrowTools(server: McpServer): void {
       try {
         const path = parent_type === "contact" ? `/contacts/${parent_id}/notes` : `/matters/${parent_id}/notes`;
         const params = growListParams({ created_since, updated_since });
-        const rows = filterByIds(await growFetchAllPages<any>(path, params, max_results), ids);
-        return ok({ parent_type, parent_id, count: rows.length, notes: rows });
+        const { rows, ...meta } = await growList(path, params, { max_results, ids });
+        return ok({ parent_type, parent_id, ...meta, notes: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -426,11 +464,8 @@ export function registerGrowTools(server: McpServer): void {
         const params = growListParams({ created_since, updated_since });
         params.state = state ?? "untriaged";
         if (query) params.query = query;
-        const rows = filterByIds(
-          await growFetchAllPages<any>("/inbox_leads", params, max_results),
-          ids
-        );
-        return ok({ state: params.state, count: rows.length, inbox_leads: rows });
+        const { rows, ...meta } = await growList("/inbox_leads", params, { max_results, ids });
+        return ok({ state: params.state, ...meta, inbox_leads: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -474,8 +509,8 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const rows = filterByIds(await growFetchAllPages<any>("/sources", params, max_results), ids);
-        return ok({ count: rows.length, sources: rows });
+        const { rows, ...meta } = await growList("/sources", params, { max_results, ids });
+        return ok({ ...meta, sources: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -503,8 +538,8 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const rows = filterByIds(await growFetchAllPages<any>("/users", params, max_results), ids);
-        return ok({ count: rows.length, users: rows });
+        const { rows, ...meta } = await growList("/users", params, { max_results, ids });
+        return ok({ ...meta, users: rows });
       } catch (err: any) {
         return growError(err);
       }
@@ -518,8 +553,8 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const rows = filterByIds(await growFetchAllPages<any>("/custom_actions", params, max_results), ids);
-        return ok({ count: rows.length, custom_actions: rows });
+        const { rows, ...meta } = await growList("/custom_actions", params, { max_results, ids });
+        return ok({ ...meta, custom_actions: rows });
       } catch (err: any) {
         return growError(err);
       }
