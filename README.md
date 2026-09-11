@@ -399,3 +399,20 @@ Lead inbox (all leads) — those rows are read-only, so this grants no mutation
 rights over client matter or contact records. Requires the matching App
 Permissions to be selected on the app in the portal, and a reconnect at
 `/grow/oauth/start`; existing tokens keep the scopes they were consented for.
+
+### 2026-09-11 — Grow: custom field values, matter types, locations
+Re-vendored `docs/clio-grow.openapi.yaml` from the current Clio Grow v2 spec.
+The previous copy was a 2026-07-16 snapshot missing four endpoints and five
+schemas, and it did not document `redacted_fields` at all.
+
+New in the current spec, now exercised:
+- `include=custom_field_values` on `/matters` and `/contacts` — surfaced as
+  `include_custom_fields` on `get_grow_matters` and `get_grow_contacts`. Off by
+  default, so existing calls are byte-for-byte unchanged. Needs the
+  `grow_custom_field_read` scope; without it the field returns null and is
+  listed in `redacted_fields`.
+- `GET /matter_types`, `/matter_types/{id}` — new tool `get_grow_matter_types`.
+- `GET /locations`, `/locations/{id}` — new tool `get_grow_locations`.
+
+These use the `grow_custom_field_read`, `grow_matter_type_read`, and
+`grow_location_read` scopes added in #244, which until now had no caller.
