@@ -16,13 +16,37 @@ import {
 // pointing at the synced Clio Manage record, which is the join key back to the
 // Manage tools in the rest of this server.
 
-// Default page cap for Grow list endpoints. Grow accounts accumulate intake
+// Default page caps for Grow list endpoints. Grow accounts accumulate intake
 // records indefinitely (a mid-size firm carries thousands of contacts and
 // matters), and "every page" is not a usable default at that size: /contacts
 // returned 3.4MB and blew the response budget, /matters 504'd at the gateway
 // before the walk finished. Capping by default makes the common call succeed
 // and makes the incomplete case visible via `truncated` rather than silent.
-const GROW_DEFAULT_MAX_RESULTS = 200;
+//
+// The cap is PER ENDPOINT because row width varies by more than an order of
+// magnitude. A flat 200 was measured wrong in both directions: 200 matters is
+// ~250KB (each carries a nested client, assignee ids, and custom field values)
+// and still overflowed the response budget, while the taxonomy endpoints are
+// bounded by their nature — this account has 32 users, 17 matter types, 16
+// sources, 3 locations — so a cap there only risks silently truncating a list
+// the caller expects whole. Numbers below are the measured row widths, not
+// round guesses.
+const GROW_MAX_RESULTS = {
+  /** ~1.2KB/row: nested client, matter_assignee_ids, custom_field_values. */
+  matters: 50,
+  /** ~600B/row: emails, phone_numbers, matters[], addresses. */
+  contacts: 100,
+  /** Note bodies are free text and can run long. */
+  notes: 50,
+  /** ~250B/row. */
+  inbox_leads: 100,
+  /**
+   * Account taxonomy/roster: bounded by how a firm is configured, not by how
+   * much intake it has done. High enough never to bite in practice, but still
+   * a cap — an uncapped walk is the failure mode this whole change removes.
+   */
+  taxonomy: 500,
+} as const;
 
 // Shared list-filter inputs (Grow supports these on every list endpoint).
 const sinceFilters = {
@@ -42,7 +66,7 @@ const sinceFilters = {
     .number()
     .optional()
     .describe(
-      `Cap the number of returned rows (default: ${GROW_DEFAULT_MAX_RESULTS}). Pass a higher number to widen; narrow with created_since/updated_since/query instead of raising this on a large account.`
+      `Cap the number of returned rows. The default is per-endpoint and sized to the row width (${GROW_MAX_RESULTS.matters} matters, ${GROW_MAX_RESULTS.contacts} contacts, ${GROW_MAX_RESULTS.taxonomy} for users/sources/matter types/locations); a truncated response says so. Pass a higher number to widen; on a large account narrow with created_since/updated_since/query instead of raising this.`
     ),
 };
 
@@ -188,17 +212,21 @@ export function growScopeReport(token: string | undefined) {
  * reached and return an empty list for records that exist. An explicit
  * max_results still applies — the caller asked for it.
  */
-export function resolveGrowCap(max_results?: number, ids?: number[]): number | undefined {
+export function resolveGrowCap(
+  max_results: number | undefined,
+  ids: number[] | undefined,
+  defaultCap: number
+): number | undefined {
   if (max_results !== undefined) return max_results;
-  return ids?.length ? undefined : GROW_DEFAULT_MAX_RESULTS;
+  return ids?.length ? undefined : defaultCap;
 }
 
 async function growList(
   path: string,
   params: Record<string, any>,
-  opts: { max_results?: number; ids?: number[] }
+  opts: { max_results?: number; ids?: number[]; defaultCap: number }
 ): Promise<{ count: number; rows: any[]; truncated?: true; truncation_note?: string }> {
-  const cap = resolveGrowCap(opts.max_results, opts.ids);
+  const cap = resolveGrowCap(opts.max_results, opts.ids, opts.defaultCap);
   const { rows, truncated } = await growFetchCapped<any>(path, params, cap);
   const filtered = filterByIds(rows, opts.ids);
   return {
@@ -320,7 +348,7 @@ export function registerGrowTools(server: McpServer): void {
         }
         const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (query) params.query = query;
-        const { rows, ...meta } = await growList("/contacts", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/contacts", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.contacts });
         return ok({ ...meta, contacts: rows });
       } catch (err: any) {
         return growError(err);
@@ -348,7 +376,7 @@ export function registerGrowTools(server: McpServer): void {
         const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (inbox_lead_id) params.inbox_lead_id = inbox_lead_id;
         if (submitted_only !== undefined) params.submitted_only = submitted_only;
-        const { rows, ...meta } = await growList("/matters", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/matters", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.matters });
         return ok({ ...meta, matters: rows });
       } catch (err: any) {
         return growError(err);
@@ -372,7 +400,7 @@ export function registerGrowTools(server: McpServer): void {
         const { rows, ...meta } = await growList(
           "/matter_types",
           growListParams({ created_since, updated_since }),
-          { max_results, ids }
+          { max_results, ids, defaultCap: GROW_MAX_RESULTS.taxonomy }
         );
         return ok({ ...meta, matter_types: rows });
       } catch (err: any) {
@@ -397,7 +425,7 @@ export function registerGrowTools(server: McpServer): void {
         const { rows, ...meta } = await growList(
           "/locations",
           growListParams({ created_since, updated_since }),
-          { max_results, ids }
+          { max_results, ids, defaultCap: GROW_MAX_RESULTS.taxonomy }
         );
         return ok({ ...meta, locations: rows });
       } catch (err: any) {
@@ -418,7 +446,7 @@ export function registerGrowTools(server: McpServer): void {
       try {
         const path = parent_type === "contact" ? `/contacts/${parent_id}/notes` : `/matters/${parent_id}/notes`;
         const params = growListParams({ created_since, updated_since });
-        const { rows, ...meta } = await growList(path, params, { max_results, ids });
+        const { rows, ...meta } = await growList(path, params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.notes });
         return ok({ parent_type, parent_id, ...meta, notes: rows });
       } catch (err: any) {
         return growError(err);
@@ -464,7 +492,7 @@ export function registerGrowTools(server: McpServer): void {
         const params = growListParams({ created_since, updated_since });
         params.state = state ?? "untriaged";
         if (query) params.query = query;
-        const { rows, ...meta } = await growList("/inbox_leads", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/inbox_leads", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.inbox_leads });
         return ok({ state: params.state, ...meta, inbox_leads: rows });
       } catch (err: any) {
         return growError(err);
@@ -509,7 +537,7 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const { rows, ...meta } = await growList("/sources", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/sources", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.taxonomy });
         return ok({ ...meta, sources: rows });
       } catch (err: any) {
         return growError(err);
@@ -538,7 +566,7 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const { rows, ...meta } = await growList("/users", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/users", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.taxonomy });
         return ok({ ...meta, users: rows });
       } catch (err: any) {
         return growError(err);
@@ -553,7 +581,7 @@ export function registerGrowTools(server: McpServer): void {
     async ({ created_since, updated_since, ids, max_results }) => {
       try {
         const params = growListParams({ created_since, updated_since });
-        const { rows, ...meta } = await growList("/custom_actions", params, { max_results, ids });
+        const { rows, ...meta } = await growList("/custom_actions", params, { max_results, ids, defaultCap: GROW_MAX_RESULTS.taxonomy });
         return ok({ ...meta, custom_actions: rows });
       } catch (err: any) {
         return growError(err);
