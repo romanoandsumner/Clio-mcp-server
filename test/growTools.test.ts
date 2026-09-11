@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { growListParams, summarizeGrowPipeline } from "../src/tools/grow";
+import { growListParams, resolveGrowCap, summarizeGrowPipeline } from "../src/tools/grow";
 
 describe("growListParams", () => {
   it("passes through created_since/updated_since and drops ids", () => {
@@ -44,5 +44,28 @@ describe("summarizeGrowPipeline", () => {
     expect(s.matters_total).toBe(0);
     expect(s.by_status_category).toEqual({});
     expect(s.inbox_leads).toBeNull();
+  });
+});
+
+describe("resolveGrowCap", () => {
+  it("caps at the default when the caller asks for nothing", () => {
+    expect(resolveGrowCap(undefined, undefined)).toBe(200);
+    expect(resolveGrowCap(undefined, [])).toBe(200);
+  });
+
+  it("honours an explicit max_results, including above the default", () => {
+    expect(resolveGrowCap(5, undefined)).toBe(5);
+    expect(resolveGrowCap(1000, undefined)).toBe(1000);
+    expect(resolveGrowCap(0, undefined)).toBe(0);
+  });
+
+  // ids[] is matched client-side after paging, so a default cap could stop
+  // paging before the requested ids are reached and report them as absent.
+  it("does not apply the default cap to an ids[] query", () => {
+    expect(resolveGrowCap(undefined, [42])).toBeUndefined();
+  });
+
+  it("still honours an explicit max_results alongside ids[]", () => {
+    expect(resolveGrowCap(10, [42])).toBe(10);
   });
 });

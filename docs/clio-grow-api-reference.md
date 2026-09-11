@@ -59,9 +59,20 @@ flow — distinct from both Clio Identity/SSO and the legacy Manage API:
 
   Clio offers **no** write scope for Matters, Contacts, Custom fields, Users, or
   Lead inbox (all leads) — those rows are read-only, so the full set grants no
-  mutation rights over client matter or contact records. No tool currently
-  exercises `grow_custom_field_read`, `grow_location_*`, or `grow_matter_type_*`;
-  they are requested so the token is not the limiting factor when one is added.
+  mutation rights over client matter or contact records. `grow_custom_field_read`
+  is requested but not yet exercised by any tool, so the token is not the
+  limiting factor when one is added.
+
+  **The API names scopes without the `grow_` prefix in its 403 bodies.** A
+  `ForbiddenError: Access to this resource requires scope "location_read"` means
+  the *`grow_location_read`* consent is missing — the prefixed form is correct in
+  `GROW_OAUTH_SCOPE`, and stripping it to match the error message will break
+  every scope that currently works. A 403 naming a scope is the one reliable
+  signal that a re-consent is needed: Clio's access tokens carry no `scp`/`scope`
+  claim, so `grow_who_am_i` reports `token_scope: null` and cannot compute
+  `missing_scope`. Existing tokens never gain newly requested scopes — after any
+  change to `GROW_OAUTH_SCOPE`, each user must reconnect at `/grow/oauth/start`.
+
   Note that notes are gated by their own
   `grow_{matter,contact}_note_*` scopes (not the parent read scope) and custom
   actions by `grow_custom_action_*` — requesting only the parent read scopes

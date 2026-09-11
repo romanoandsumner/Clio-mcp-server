@@ -18,8 +18,18 @@ describe("readTokenScopes", () => {
     expect(readTokenScopes(token)).toEqual(["grow_contact_read", "grow_matter_read"]);
   });
 
-  it("returns [] for a JWT with no scope claim (distinct from opaque)", () => {
-    expect(readTokenScopes(jwt({ sub: "abc" }))).toEqual([]);
+  // A JWT with no scope claim is "can't tell", NOT "zero scopes granted":
+  // Clio's live tokens carry neither claim, and treating that as [] reported a
+  // fully working token as missing all 17 requested scopes.
+  it("returns null for a JWT carrying neither scp nor scope", () => {
+    expect(readTokenScopes(jwt({ sub: "abc" }))).toBeNull();
+  });
+
+  it("does not report missing scopes for a JWT with no scope claim", () => {
+    const report = growScopeReport(jwt({ sub: "abc" }));
+    expect(report.token_scope).toBeNull();
+    expect(report.missing_scope).toBeNull();
+    expect(report).toHaveProperty("scope_note");
   });
 
   it("returns null for opaque (non-JWT) tokens and missing tokens", () => {
