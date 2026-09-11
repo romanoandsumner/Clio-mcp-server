@@ -48,24 +48,25 @@ describe("summarizeGrowPipeline", () => {
 });
 
 describe("resolveGrowCap", () => {
-  it("caps at the default when the caller asks for nothing", () => {
-    expect(resolveGrowCap(undefined, undefined)).toBe(200);
-    expect(resolveGrowCap(undefined, [])).toBe(200);
+  it("falls back to the endpoint's own default when the caller asks for nothing", () => {
+    expect(resolveGrowCap(undefined, undefined, 50)).toBe(50);
+    expect(resolveGrowCap(undefined, [], 100)).toBe(100);
+    expect(resolveGrowCap(undefined, undefined, 500)).toBe(500);
   });
 
   it("honours an explicit max_results, including above the default", () => {
-    expect(resolveGrowCap(5, undefined)).toBe(5);
-    expect(resolveGrowCap(1000, undefined)).toBe(1000);
-    expect(resolveGrowCap(0, undefined)).toBe(0);
+    expect(resolveGrowCap(5, undefined, 50)).toBe(5);
+    expect(resolveGrowCap(1000, undefined, 50)).toBe(1000);
+    expect(resolveGrowCap(0, undefined, 50)).toBe(0);
   });
 
   // ids[] is matched client-side after paging, so a default cap could stop
   // paging before the requested ids are reached and report them as absent.
   it("does not apply the default cap to an ids[] query", () => {
-    expect(resolveGrowCap(undefined, [42])).toBeUndefined();
+    expect(resolveGrowCap(undefined, [42], 50)).toBeUndefined();
   });
 
   it("still honours an explicit max_results alongside ids[]", () => {
-    expect(resolveGrowCap(10, [42])).toBe(10);
+    expect(resolveGrowCap(10, [42], 50)).toBe(10);
   });
 });
