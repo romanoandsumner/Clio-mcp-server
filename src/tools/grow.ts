@@ -37,6 +37,27 @@ const sinceFilters = {
 
 // `ids` is applied client-side (filterByIds) - Grow expects repeated ids[]
 // params, which the shared buildQueryString can't express.
+/**
+ * Shared `include_custom_fields` argument. Grow exposes custom fields as an
+ * expansion on the matter/contact payload (`include=custom_field_values`), not
+ * as its own collection — there is no /custom_fields endpoint on the Grow API.
+ */
+const includeCustomFieldsArg = z
+  .boolean()
+  .optional()
+  .describe(
+    "Also return custom_field_values on each record (Grow's include=custom_field_values). Requires the grow_custom_field_read scope; without it the field is null and listed in redacted_fields."
+  );
+
+/**
+ * Builds the `include` query param. Grow ignores unrecognised include values,
+ * and custom_field_values is currently the only one it supports, so this stays
+ * a single boolean rather than a free-text passthrough.
+ */
+export function growIncludeParams(includeCustomFields?: boolean): Record<string, string> {
+  return includeCustomFields ? { include: "custom_field_values" } : {};
+}
+
 export function growListParams(args: {
   created_since?: string;
   updated_since?: string;
@@ -233,19 +254,21 @@ export function registerGrowTools(server: McpServer): void {
 
   server.tool(
     "get_grow_contacts",
-    "List/search Clio Grow (intake CRM) contacts, or fetch one by contact_id. Returns name, emails, phone_numbers, type (Person/Company), intake status (e.g. Unassigned/Intake/Hired/Did Not Hire), associated Grow matter ids, addresses, and clio_id (the synced Clio Manage contact ID — use it to join to Manage tools like get_contacts).",
+    "List/search Clio Grow (intake CRM) contacts, or fetch one by contact_id. Returns name, emails, phone_numbers, type (Person/Company), intake status (e.g. Unassigned/Intake/Hired/Did Not Hire), associated Grow matter ids, addresses, and clio_id (the synced Clio Manage contact ID — use it to join to Manage tools like get_contacts). Set include_custom_fields to also return custom_field_values (needs the grow_custom_field_read scope; without it the field comes back null and listed in redacted_fields).",
     {
       contact_id: z.number().optional().describe("Fetch a single Grow contact by ID (ignores other filters)"),
       query: z.string().optional().describe("Search across contact names, emails, and phone numbers"),
+      include_custom_fields: includeCustomFieldsArg,
       ...sinceFilters,
     },
-    async ({ contact_id, query, created_since, updated_since, ids, max_results }) => {
+    async ({ contact_id, query, include_custom_fields, created_since, updated_since, ids, max_results }) => {
       try {
+        const includeParams = growIncludeParams(include_custom_fields);
         if (contact_id) {
-          const res = await growGetSingle(`/contacts/${contact_id}`);
+          const res = await growGetSingle(`/contacts/${contact_id}`, includeParams);
           return ok({ contact: res?.data ?? res });
         }
-        const params = growListParams({ created_since, updated_since });
+        const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (query) params.query = query;
         const rows = filterByIds(
           await growFetchAllPages<any>("/contacts", params, max_results),
@@ -265,15 +288,17 @@ export function registerGrowTools(server: McpServer): void {
       matter_id: z.number().optional().describe("Fetch a single Grow matter by ID (ignores other filters)"),
       inbox_lead_id: z.number().optional().describe("Only matters created from this inbox lead"),
       submitted_only: z.boolean().optional().describe("Only matters submitted by the current application"),
+      include_custom_fields: includeCustomFieldsArg,
       ...sinceFilters,
     },
-    async ({ matter_id, inbox_lead_id, submitted_only, created_since, updated_since, ids, max_results }) => {
+    async ({ matter_id, inbox_lead_id, submitted_only, include_custom_fields, created_since, updated_since, ids, max_results }) => {
       try {
+        const includeParams = growIncludeParams(include_custom_fields);
         if (matter_id) {
-          const res = await growGetSingle(`/matters/${matter_id}`);
+          const res = await growGetSingle(`/matters/${matter_id}`, includeParams);
           return ok({ matter: res?.data ?? res });
         }
-        const params = growListParams({ created_since, updated_since });
+        const params = { ...growListParams({ created_since, updated_since }), ...includeParams };
         if (inbox_lead_id) params.inbox_lead_id = inbox_lead_id;
         if (submitted_only !== undefined) params.submitted_only = submitted_only;
         const rows = filterByIds(
@@ -281,6 +306,62 @@ export function registerGrowTools(server: McpServer): void {
           ids
         );
         return ok({ count: rows.length, matters: rows });
+      } catch (err: any) {
+        return growError(err);
+      }
+    }
+  );
+
+  server.tool(
+    "get_grow_matter_types",
+    "List the Clio Grow account's matter types (the intake pipeline taxonomy), or fetch one by matter_type_id. Returns id, name, default (the account's fallback type for matters created without one), and timestamps. The `type` string on get_grow_matters records is one of these names. Requires the grow_matter_type_read scope.",
+    {
+      matter_type_id: z.number().optional().describe("Fetch a single matter type by ID (ignores other filters)"),
+      ...sinceFilters,
+    },
+    async ({ matter_type_id, created_since, updated_since, ids, max_results }) => {
+      try {
+        if (matter_type_id) {
+          const res = await growGetSingle(`/matter_types/${matter_type_id}`);
+          return ok({ matter_type: res?.data ?? res });
+        }
+        const rows = filterByIds(
+          await growFetchAllPages<any>(
+            "/matter_types",
+            growListParams({ created_since, updated_since }),
+            max_results
+          ),
+          ids
+        );
+        return ok({ count: rows.length, matter_types: rows });
+      } catch (err: any) {
+        return growError(err);
+      }
+    }
+  );
+
+  server.tool(
+    "get_grow_locations",
+    "List the Clio Grow account's office locations, or fetch one by location_id. Returns id, name, and timestamps. The `location` string on get_grow_matters records is one of these names. Requires the grow_location_read scope.",
+    {
+      location_id: z.number().optional().describe("Fetch a single location by ID (ignores other filters)"),
+      ...sinceFilters,
+    },
+    async ({ location_id, created_since, updated_since, ids, max_results }) => {
+      try {
+        if (location_id) {
+          const res = await growGetSingle(`/locations/${location_id}`);
+          return ok({ location: res?.data ?? res });
+        }
+        const rows = filterByIds(
+          await growFetchAllPages<any>(
+            "/locations",
+            growListParams({ created_since, updated_since }),
+            max_results
+          ),
+          ids
+        );
+        return ok({ count: rows.length, locations: rows });
       } catch (err: any) {
         return growError(err);
       }

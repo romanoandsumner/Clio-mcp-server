@@ -60,6 +60,10 @@ tags:
     The nonce value is a single-use code and has an expiry of 60 seconds.
 - name: Inbox Leads
   description: Operations for managing inbox leads
+- name: Locations
+  description: Operations for managing locations
+- name: Matter Types
+  description: Operations for managing matter types
 - name: Matters
   description: Operations for managing matters and matter notes
 - name: Sources
@@ -84,6 +88,7 @@ paths:
       - "$ref": "#/components/parameters/CreatedSinceParam"
       - "$ref": "#/components/parameters/UpdatedSinceParam"
       - "$ref": "#/components/parameters/IdsFilterParam"
+      - "$ref": "#/components/parameters/IncludeParam"
       responses:
         '200':
           description: Ok
@@ -123,6 +128,7 @@ paths:
         schema:
           type: integer
           format: int64
+      - "$ref": "#/components/parameters/IncludeParam"
       responses:
         '200':
           description: Ok
@@ -376,6 +382,7 @@ paths:
       - "$ref": "#/components/parameters/CreatedSinceParam"
       - "$ref": "#/components/parameters/UpdatedSinceParam"
       - "$ref": "#/components/parameters/IdsFilterParam"
+      - "$ref": "#/components/parameters/IncludeParam"
       - name: inbox_lead_id
         in: query
         description: Filter matters by inbox lead ID
@@ -426,6 +433,7 @@ paths:
         schema:
           type: integer
           format: int64
+      - "$ref": "#/components/parameters/IncludeParam"
       responses:
         '200':
           description: Ok
@@ -961,6 +969,32 @@ paths:
                           format: int64
                           description: ID of the Grow Source
                           example: 42
+                    matter_type:
+                      type: object
+                      additionalProperties: false
+                      description: The matter type to associate with the lead (optional).
+                        Ignored, with the lead still created, if the id does not resolve
+                        to a matter type on the account or if the account is not yet
+                        on the phased rollout.
+                      properties:
+                        id:
+                          type: integer
+                          format: int64
+                          description: ID of the matter type
+                          example: 17
+                    matter_location:
+                      type: object
+                      additionalProperties: false
+                      description: The office location to associate with the lead
+                        (optional). Ignored, with the lead still created, if the id
+                        does not resolve to a location on the account or if the account
+                        is not yet on the phased rollout.
+                      properties:
+                        id:
+                          type: integer
+                          format: int64
+                          description: ID of the location
+                          example: 23
       responses:
         '201':
           description: Created
@@ -1062,6 +1096,250 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/Error"
+  "/matter_types":
+    get:
+      operationId: listMatterTypes
+      summary: List matter types
+      description: Returns a paginated list of the account's matter types
+      tags:
+      - Matter Types
+      parameters:
+      - "$ref": "#/components/parameters/PageTokenParam"
+      - "$ref": "#/components/parameters/CreatedSinceParam"
+      - "$ref": "#/components/parameters/UpdatedSinceParam"
+      - "$ref": "#/components/parameters/IdsFilterParam"
+      responses:
+        '200':
+          description: Ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/matter_type"
+                  meta:
+                    "$ref": "#/components/schemas/ListMeta"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
+    post:
+      operationId: createMatterType
+      summary: Create a matter type
+      description: Creates a new matter type for the account
+      tags:
+      - Matter Types
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - data
+              properties:
+                data:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - name
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 255
+                      description: The name of the matter type (unique per account)
+                      example: Family Law
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/matter_type"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '422':
+          "$ref": "#/components/responses/UnprocessableEntityResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
+  "/matter_types/{id}":
+    get:
+      operationId: getMatterType
+      summary: Get a matter type
+      description: Returns a single matter type by ID
+      tags:
+      - Matter Types
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: The unique identifier for the Matter Type
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/matter_type"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '404':
+          "$ref": "#/components/responses/NotFoundResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
+  "/locations":
+    get:
+      operationId: listLocations
+      summary: List locations
+      description: Returns a paginated list of the account's locations
+      tags:
+      - Locations
+      parameters:
+      - "$ref": "#/components/parameters/PageTokenParam"
+      - "$ref": "#/components/parameters/CreatedSinceParam"
+      - "$ref": "#/components/parameters/UpdatedSinceParam"
+      - "$ref": "#/components/parameters/IdsFilterParam"
+      responses:
+        '200':
+          description: Ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    type: array
+                    items:
+                      "$ref": "#/components/schemas/location"
+                  meta:
+                    "$ref": "#/components/schemas/ListMeta"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
+    post:
+      operationId: createLocation
+      summary: Create a location
+      description: Creates a new location for the account
+      tags:
+      - Locations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - data
+              properties:
+                data:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - name
+                  properties:
+                    name:
+                      type: string
+                      maxLength: 255
+                      description: The name of the location (unique per account, case-insensitive)
+                      example: Austin Office
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/location"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '422':
+          "$ref": "#/components/responses/UnprocessableEntityResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
+  "/locations/{id}":
+    get:
+      operationId: getLocation
+      summary: Get a location
+      description: Returns a single location by ID
+      tags:
+      - Locations
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: The unique identifier for the Location
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                properties:
+                  data:
+                    "$ref": "#/components/schemas/location"
+        '400':
+          "$ref": "#/components/responses/BadRequestResponse"
+        '401':
+          "$ref": "#/components/responses/UnauthorizedResponse"
+        '403':
+          "$ref": "#/components/responses/ForbiddenResponse"
+        '404':
+          "$ref": "#/components/responses/NotFoundResponse"
+        '429':
+          "$ref": "#/components/responses/TooManyRequestsResponse"
   "/sources":
     get:
       operationId: listSources
@@ -1183,6 +1461,16 @@ components:
           format: int64
         minItems: 1
         maxItems: 50
+    IncludeParam:
+      name: include
+      in: query
+      description: Comma-separated list of related resources to expand in the response.
+        Omitted resources are absent from the payload rather than null. Unrecognised
+        values are ignored. Currently the only supported value is `custom_field_values`,
+        which additionally requires the `custom_field_read` scope.
+      schema:
+        type: string
+      example: custom_field_values
   schemas:
     address:
       type: object
@@ -1212,6 +1500,213 @@ components:
           nullable: true
           description: Country
           example: USA
+    picklist_option:
+      type: object
+      additionalProperties: false
+      required:
+      - global_id
+      - clio_id
+      - option
+      description: An option on a picklist custom field. Options carry no identifier
+        of their own in Grow, so they are identified by `global_id`, by `clio_id`,
+        or by both. An option created in Grow has a `global_id` and no `clio_id`;
+        an option synced from Clio Manage before global identifiers were issued has
+        a `clio_id` and no `global_id`.
+      properties:
+        global_id:
+          type: string
+          nullable: true
+          description: Global ULID identifier for the option
+          example: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        clio_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Clio Manage ID if synced
+          example: 1111
+        option:
+          type: string
+          description: The option's label
+          example: blue
+    custom_field:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - global_id
+      - name
+      - field_type
+      - parent_type
+      - displayed
+      - deleted
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique identifier for the custom field
+          example: 91
+        global_id:
+          type: string
+          description: Global ULID identifier for the custom field
+          example: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        clio_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Clio Manage ID if synced
+          example: 4567
+        name:
+          type: string
+          nullable: true
+          description: The name of the custom field. Null when the field's definition
+            is missing, which can happen for values whose definition was removed.
+          example: Defence Insurance
+        field_type:
+          type: string
+          nullable: true
+          description: The type of the custom field. Null when the field's definition
+            is missing.
+          enum:
+          - checkbox
+          - contact
+          - currency
+          - date
+          - email
+          - numeric
+          - picklist
+          - text_area
+          - text_line
+          - url
+          example: text_line
+        parent_type:
+          type: string
+          description: The kind of record this custom field applies to
+          enum:
+          - Contact
+          - Matter
+          example: Matter
+        displayed:
+          type: boolean
+          description: Whether the field is applied to newly created records of its
+            parent type
+          example: true
+        deleted:
+          type: boolean
+          description: Whether the custom field's definition has been deleted. Values
+            belonging to a deleted definition are not returned.
+          example: false
+        picklist_options:
+          type: array
+          description: The options available on a picklist custom field, in display
+            order. Present only when `field_type` is `picklist`.
+          items:
+            "$ref": "#/components/schemas/picklist_option"
+        created_at:
+          type: string
+          format: date-time
+          description: The time the custom field was created (ISO-8601 timestamp)
+          example: '2024-01-15T10:30:00Z'
+        updated_at:
+          type: string
+          format: date-time
+          description: The time the custom field was last updated (ISO-8601 timestamp)
+          example: '2024-02-20T14:45:00Z'
+    custom_field_value:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - global_id
+      - field_name
+      - field_type
+      - value
+      - raw_value
+      - custom_field
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique identifier for the custom field value
+          example: 123
+        global_id:
+          type: string
+          description: Global ULID identifier for the custom field value
+          example: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+        clio_id:
+          type: string
+          nullable: true
+          description: Clio Manage ID if synced. A string rather than an integer,
+            unlike `clio_id` elsewhere in this API, because Manage identifies a value
+            by its type and its per-type row.
+          example: text_line-4567
+        field_name:
+          type: string
+          nullable: true
+          description: The name of the custom field this value belongs to. Null when
+            the field's definition is missing.
+          example: Defence Insurance
+        field_type:
+          type: string
+          nullable: true
+          description: The type of the custom field this value belongs to. Null when
+            the field's definition is missing.
+          enum:
+          - checkbox
+          - contact
+          - currency
+          - date
+          - email
+          - numeric
+          - picklist
+          - text_area
+          - text_line
+          - url
+          example: text_line
+        value:
+          nullable: true
+          description: 'The value, coerced to the type named by `field_type`: a boolean
+            for `checkbox`, an ISO-8601 date for `date`, a number for `numeric` and
+            `currency`, and a string otherwise. Null when the stored text cannot be
+            coerced — `raw_value` still carries it. A `contact` value is the contact''s
+            name; Grow does not store a reference to the contact record.'
+          oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+          example: abc insurance
+        raw_value:
+          type: string
+          nullable: true
+          description: The value before coercion, as stored. Identical to `value`
+            for the types that need no coercion, and the only place the original survives
+            when coercion fails.
+          example: abc insurance
+        custom_field:
+          nullable: true
+          description: The definition this value belongs to. Null when the definition
+            is missing.
+          allOf:
+          - "$ref": "#/components/schemas/custom_field"
+        picklist_option:
+          description: The selected option. Present only when `field_type` is `picklist`,
+            and null when the stored value matches none of the field's options.
+          nullable: true
+          allOf:
+          - "$ref": "#/components/schemas/picklist_option"
+        created_at:
+          type: string
+          format: date-time
+          description: The time the value was created (ISO-8601 timestamp)
+          example: '2024-01-15T10:30:00Z'
+        updated_at:
+          type: string
+          format: date-time
+          description: The time the value was last updated (ISO-8601 timestamp)
+          example: '2024-02-20T14:45:00Z'
     contact:
       type: object
       required:
@@ -1306,6 +1801,15 @@ components:
           format: date-time
           description: The time the contact was last updated (ISO-8601 timestamp)
           example: '2024-02-20T14:45:00Z'
+        custom_field_values:
+          type: array
+          nullable: true
+          description: Custom field values on this record. Absent unless requested
+            with `include=custom_field_values`. Null, with `custom_field_values` listed
+            in `redacted_fields`, when the caller lacks the `custom_field_read` scope;
+            an empty array when the record has no values.
+          items:
+            "$ref": "#/components/schemas/custom_field_value"
     Paging:
       type: object
       properties:
@@ -1478,6 +1982,7 @@ components:
         description:
           type: string
           nullable: true
+          maxLength: 255
           description: Description of the matter
           example: Personal injury case
         created_at:
@@ -1557,6 +2062,15 @@ components:
           example:
           - 123456
           - 789012
+        custom_field_values:
+          type: array
+          nullable: true
+          description: Custom field values on this record. Absent unless requested
+            with `include=custom_field_values`. Null, with `custom_field_values` listed
+            in `redacted_fields`, when the caller lacks the `custom_field_read` scope;
+            an empty array when the record has no values.
+          items:
+            "$ref": "#/components/schemas/custom_field_value"
     CustomActionUIReference:
       type: string
       enum:
@@ -1656,6 +2170,63 @@ components:
           format: date-time
           description: The time the lead was last updated (ISO-8601 timestamp)
           example: '2024-02-20T14:45:00Z'
+        marketing_source:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The marketing source (Grow Source) attached to the lead, or
+            null.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the marketing source
+              example: 42
+            name:
+              type: string
+              description: The name of the marketing source
+              example: Google Ads
+        matter_type:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The matter type attached to the lead, or null. Absent for accounts
+            not yet on the phased rollout.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the matter type
+              example: 17
+            name:
+              type: string
+              description: The name of the matter type
+              example: Family Law
+        matter_location:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The office location attached to the lead, or null. Absent for
+            accounts not yet on the phased rollout.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the location
+              example: 23
+            name:
+              type: string
+              description: The name of the location
+              example: Austin Office
     inbox_lead_create_response:
       type: object
       additionalProperties: false
@@ -1712,6 +2283,25 @@ components:
           format: date-time
           description: The time the lead was last updated (ISO-8601 timestamp)
           example: '2024-02-20T14:45:00Z'
+        marketing_source:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The marketing source (Grow Source) attached to the lead, or
+            null.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the marketing source
+              example: 42
+            name:
+              type: string
+              description: The name of the marketing source
+              example: Google Ads
         from_message:
           type: string
           description: Message content from the lead
@@ -1725,6 +2315,107 @@ components:
           format: uri
           description: URL the lead came from
           example: https://example.com/contact
+        matter_type:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The matter type attached to the lead, or null. Absent for accounts
+            not yet on the phased rollout.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the matter type
+              example: 17
+            name:
+              type: string
+              description: The name of the matter type
+              example: Family Law
+        matter_location:
+          type: object
+          additionalProperties: false
+          nullable: true
+          description: The office location attached to the lead, or null. Absent for
+            accounts not yet on the phased rollout.
+          required:
+          - id
+          - name
+          properties:
+            id:
+              type: integer
+              format: int64
+              description: Unique identifier for the location
+              example: 23
+            name:
+              type: string
+              description: The name of the location
+              example: Austin Office
+    matter_type:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - default
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique identifier for the matter type
+          example: 42
+        name:
+          type: string
+          description: The name of the matter type
+          example: Family Law
+        default:
+          type: boolean
+          description: Whether this is the account's default matter type. Matters
+            created without an explicit matter type fall back to it. Read-only; it
+            cannot be set through the API.
+          example: false
+        created_at:
+          type: string
+          format: date-time
+          description: The time the matter type was created (ISO-8601 timestamp)
+          example: '2024-01-15T10:30:00Z'
+        updated_at:
+          type: string
+          format: date-time
+          description: The time the matter type was last updated (ISO-8601 timestamp)
+          example: '2024-02-20T14:45:00Z'
+    location:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - created_at
+      - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique identifier for the location
+          example: 42
+        name:
+          type: string
+          description: The name of the location
+          example: Austin Office
+        created_at:
+          type: string
+          format: date-time
+          description: The time the location was created (ISO-8601 timestamp)
+          example: '2024-01-15T10:30:00Z'
+        updated_at:
+          type: string
+          format: date-time
+          description: The time the location was last updated (ISO-8601 timestamp)
+          example: '2024-02-20T14:45:00Z'
     source:
       type: object
       additionalProperties: false
@@ -1813,6 +2504,12 @@ x-tagGroups:
 - name: Inbox Leads
   tags:
   - Inbox Leads
+- name: Locations
+  tags:
+  - Locations
+- name: Matter Types
+  tags:
+  - Matter Types
 - name: Matters
   tags:
   - Matters
