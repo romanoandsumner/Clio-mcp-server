@@ -26,6 +26,47 @@ export const TIME_ENTRY_STATUSES = [
 ] as const;
 export type TimeEntryStatus = (typeof TIME_ENTRY_STATUSES)[number];
 
+export class NarrativeConflictError extends Error {}
+
+/**
+ * Resolve the time-entry narrative from the two accepted spellings. Pure —
+ * unit-tested in test/timeEntryNarrative.test.ts.
+ *
+ * Clio's UI labels this field "Description", so callers reach for
+ * `description`; the Clio API (and this tool's original schema) calls it
+ * `note`. An unrecognized key is stripped by the schema before the handler
+ * runs, so a `description` passed against a note-only schema vanished
+ * silently and the entry was created with a blank narrative while the tool
+ * reported success. Accept both spellings, and refuse rather than guess when
+ * they disagree.
+ */
+export function resolveNarrative(params: { note?: string; description?: string }): string | undefined {
+  const { note, description } = params;
+  if (note !== undefined && description !== undefined && note.trim() !== description.trim()) {
+    throw new NarrativeConflictError(
+      "Both `note` and `description` were supplied with different text. They are the same field — pass only one."
+    );
+  }
+  return note ?? description;
+}
+
+/**
+ * True when a narrative was requested but the entry read back from Clio does
+ * not carry it. Pure — unit-tested in test/timeEntryNarrative.test.ts.
+ *
+ * Only meaningful against a fresh GET: Clio's POST echo is not a reliable
+ * record of what persisted, so `readbackOk=false` reports no drop rather than
+ * a false alarm.
+ */
+export function narrativeDropped(
+  requested: string | undefined,
+  saved: string | null | undefined,
+  readbackOk: boolean
+): boolean {
+  if (!readbackOk || !requested) return false;
+  return (saved ?? "").trim() !== requested.trim();
+}
+
 /**
  * Resolve the billed/status params into (a) the server-side Clio `status`
  * filter and (b) the client-side `billed` flag filter. Pure — unit-tested in
@@ -1170,7 +1211,8 @@ export function registerTimeTools(server: McpServer): void {
       on_behalf_of: z.boolean().optional().default(false).describe("Set true to deliberately log time for a timekeeper OTHER than yourself (requires user_id). Leave false/omitted for your own time."),
       matter_id: z.coerce.number().describe("Clio matter ID to log time against"),
       hours: z.coerce.number().describe("Duration in decimal hours (e.g. 1.5 for 1h30m). Values above 24 are rejected unless force=true."),
-      note: z.string().optional().describe("Description/narrative for the time entry"),
+      note: z.string().optional().describe("Description/narrative for the time entry. Accepted as `description` too — the two are the same field."),
+      description: z.string().optional().describe("Alias for `note` (Clio's UI labels this field \"Description\"). Pass either one; passing both with different text is rejected."),
       rate: z.coerce.number().optional().describe("Hourly rate in dollars. If omitted, Clio uses the matter's default rate for the timekeeper (the entry is BILLABLE). To make the entry non-billable, use non_billable=true rather than relying on rate."),
       non_billable: z.boolean().optional().describe("Set true to mark the entry non-billable (no charge). When omitted/false the entry is billable at the given or default rate. A non-billable entry does NOT appear under get_time_entries(status=\"unbilled\") — it is returned only by status=\"non_billable\", which is the usual explanation for two different \"unbilled\" counts on the same matter."),
       force: z.coerce.boolean().optional().describe("Override the 24h/day sanity ceiling on hours (essentially never needed)."),
@@ -1178,6 +1220,19 @@ export function registerTimeTools(server: McpServer): void {
     },
     async (params) => {
       try {
+        let narrative: string | undefined;
+        try {
+          narrative = resolveNarrative(params);
+        } catch (e: any) {
+          if (e instanceof NarrativeConflictError) {
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify({ error: true, message: e.message }) }],
+              isError: true,
+            };
+          }
+          throw e;
+        }
+
         const quantity = Math.round(params.hours * 3600); // Clio stores time in seconds
         if (quantity <= 0) {
           return {
@@ -1221,7 +1276,7 @@ export function registerTimeTools(server: McpServer): void {
           },
         };
 
-        if (params.note) body.data.note = params.note;
+        if (narrative) body.data.note = narrative;
         if (params.rate !== undefined && params.rate > 0) body.data.price = params.rate;
         // Explicit non-billable flag — the only reliable way to make the entry
         // non-billable (omitting rate applies the matter default and stays
@@ -1233,20 +1288,68 @@ export function registerTimeTools(server: McpServer): void {
         if (params.activity_description_id) body.data.activity_description = { id: params.activity_description_id };
 
         const result = await rawPostSingle("/activities", body);
-        const entry = result.data;
+        const created = result.data;
+        if (!created?.id) {
+          throw new Error("Time entry create returned no ID — Clio may not have created the entry.");
+        }
+
+        // Clio returns 201 even when it drops a field from the POST body, so
+        // report from a fresh GET with explicit fields rather than the POST
+        // echo. Read-back failure is non-fatal (fall back to the echo), but an
+        // entry that comes back WITHOUT the narrative that was asked for is a
+        // hard error: it exists, it is billable, and left alone it lands on a
+        // client bill as an unexplained line item.
+        let saved = created;
+        let readbackOk = false;
+        try {
+          const readback = await rawGetSingle(`/activities/${created.id}`, {
+            fields: "id,type,date,quantity,rounded_quantity,price,total,note,non_billable,matter{id,display_number},user{id,name}",
+          });
+          if (readback.data?.id) {
+            saved = readback.data;
+            readbackOk = true;
+          }
+        } catch { /* non-fatal: report from the POST echo */ }
+
+        const noteDropped = narrativeDropped(narrative, saved.note, readbackOk);
+
+        const payload = {
+          activity_id: saved.id,
+          date: saved.date,
+          hours: Math.round(((saved.rounded_quantity || saved.quantity) / 3600) * 100) / 100,
+          rate: saved.price,
+          note: readbackOk ? (saved.note ?? null) : (saved.note ?? narrative ?? null),
+          note_verified: readbackOk ? !noteDropped : false,
+          matter_id: params.matter_id,
+          user_id: timekeeperId,
+        };
+
+        if (noteDropped) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify({
+                error: true,
+                message: `Clio created time entry ${saved.id} but did NOT save the narrative — the entry currently reads "${saved.note ?? ""}". It is billable and will appear on the bill as an unexplained line item. Repair it with test_update_time_entry (activity_id ${saved.id}) or delete it with delete_activity before billing.`,
+                partial_write: true,
+                requested_note: narrative,
+                saved_note: saved.note ?? null,
+                ...payload,
+              }, null, 2),
+            }],
+            isError: true,
+          };
+        }
 
         return {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
               success: true,
-              activity_id: entry.id,
-              date: entry.date,
-              hours: Math.round(((entry.rounded_quantity || entry.quantity) / 3600) * 100) / 100,
-              rate: entry.price,
-              note: entry.note,
-              matter_id: params.matter_id,
-              user_id: timekeeperId,
+              ...payload,
+              ...(readbackOk
+                ? {}
+                : { warning: "Could not re-read the entry after creating it; the values above come from Clio's create response and are unverified. Confirm with get_time_entries before billing." }),
             }, null, 2),
           }],
         };
