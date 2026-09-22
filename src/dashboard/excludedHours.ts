@@ -29,6 +29,7 @@
 // ============================================================
 import { fetchAllPages, rawGetSingle } from "../clio/pagination";
 import type { RosterMember } from "../domain/roster";
+import { placeholderKey } from "../clio/reportCsv";
 
 // month (1-12) -> user_id -> placeholder (fee-dump) hours to back out of worked billable
 export type ExcludedHoursByMonth = Record<number, Record<number, number>>;
@@ -184,6 +185,30 @@ export async function buildExcludedHoursByMonth(
   roster: RosterMember[],
   opts: { months?: number[] } = {},
 ): Promise<ExcludedHoursByMonth> {
+  const out: ExcludedHoursByMonth = {};
+  for (const p of await findFeePlaceholders(year, month, roster, opts)) {
+    const slot = (out[p.month] ??= {});
+    slot[p.uid] = (slot[p.uid] ?? 0) + p.hours;
+  }
+  return out;
+}
+
+/** One stripped fee placeholder, carrying enough identity to find the same entry on
+ *  a Realization-report row (which has no entry id) — see placeholderKey in
+ *  clio/reportCsv. */
+export type FeePlaceholder = PlaceholderCandidate & { date: string; matterNumber: string };
+
+/**
+ * The individual fee-placeholder entries behind buildExcludedHoursByMonth — same pull,
+ * same rate test, same matter gate, same fail-safe. Exposed so the Realization tab can
+ * back out exactly the entries 26 Compare col I backs out.
+ */
+export async function findFeePlaceholders(
+  year: number,
+  month: number,
+  roster: RosterMember[],
+  opts: { months?: number[] } = {},
+): Promise<FeePlaceholder[]> {
   const months = new Set(opts.months ?? Array.from({ length: month }, (_, i) => i + 1));
   const maxMonth = Math.max(...months);
   const monthEnd = `${year}-${String(maxMonth).padStart(2, "0")}-${String(new Date(year, maxMonth, 0).getDate()).padStart(2, "0")}`;
@@ -192,7 +217,7 @@ export async function buildExcludedHoursByMonth(
 
   // Step 0 — pull each roster member's billable time entries in the window (one pull per
   // member, scoped by user_id), carrying rate + matter so candidates can be matter-gated.
-  const entries: PlaceholderCandidate[] = [];
+  const entries: Array<PlaceholderCandidate & { date: string }> = [];
   for (const r of roster) {
     let acts: any[] = [];
     try {
@@ -214,7 +239,7 @@ export async function buildExcludedHoursByMonth(
       const uid = a.user?.id;
       const matterId = a.matter?.id;
       if (!uid || !matterId) continue;
-      entries.push({ uid, month: m, hours: hoursOf(a), rate: rateOf(a), matterId });
+      entries.push({ uid, month: m, hours: hoursOf(a), rate: rateOf(a), matterId, date: String(a.date) });
     }
   }
 
@@ -231,7 +256,7 @@ export async function buildExcludedHoursByMonth(
   for (const mid of candidateMatterIds) {
     try {
       const res = await rawGetSingle(`/matters/${mid}`, {
-        fields: "id,practice_area{name},custom_field_values{field_name,value}",
+        fields: "id,display_number,practice_area{name},custom_field_values{field_name,value}",
       });
       matterById.set(mid, res?.data ?? res);
     } catch (e: any) {
@@ -240,15 +265,39 @@ export async function buildExcludedHoursByMonth(
   }
 
   // Step 3 — strip a candidate only if its matter is fee-based; otherwise pass through.
-  const out: ExcludedHoursByMonth = {};
+  const out: FeePlaceholder[] = [];
   let stripped = 0, passedThrough = 0;
   for (const c of candidates) {
     const matter = matterById.get(c.matterId);
     if (!matter || !matterQualifiesForStrip(matter)) { passedThrough++; continue; }
-    const slot = (out[c.month] ??= {});
-    slot[c.uid] = (slot[c.uid] ?? 0) + c.hours;
+    out.push({ ...c, matterNumber: String(matter.display_number ?? "") });
     stripped++;
   }
   console.log(`[Dashboard] fee-placeholder candidates=${candidates.length}, candidate matters looked up=${candidateMatterIds.length}, stripped=${stripped}, passed through (legit hourly)=${passedThrough}`);
   return out;
+}
+
+/**
+ * placeholderKey()s for every fee placeholder in `months` of `year`, for backing them
+ * out of the Realization tab. Never throws: if the pull fails outright the tab is
+ * written without placeholder stripping (the prior behavior) and the failure is
+ * logged, rather than losing the whole tab.
+ */
+export async function feePlaceholderKeys(
+  year: number,
+  months: number[],
+  roster: RosterMember[],
+): Promise<Set<string>> {
+  try {
+    const found = await findFeePlaceholders(year, Math.max(...months), roster, { months });
+    const keys = new Set<string>();
+    for (const p of found) {
+      if (!p.matterNumber) continue; // no display number to match a report row on
+      keys.add(placeholderKey(p.uid, p.date, p.matterNumber, p.rate));
+    }
+    return keys;
+  } catch (e: any) {
+    console.warn(`[Dashboard] fee-placeholder keys for Realization failed (${e?.message ?? e}); placeholders NOT backed out of the Realization tab this run`);
+    return new Set();
+  }
 }

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseCSV, matchRosterUser, matchRosterResponsible,
   aggregateRealizationCollections, aggregateFeeAllocationCollectionHrs,
-  aggregateRealizationHours, isUnbilledRealizStatus,
+  aggregateRealizationHours, isUnbilledRealizStatus, placeholderKey, realizRowDate,
 } from "../src/clio/reportCsv";
 
 const roster = [
@@ -227,5 +227,93 @@ describe("aggregateRealizationHours", () => {
     ], nameToUid)[NRN];
     expect(a.unbilledHrs).toBeCloseTo(2, 6);
     expect(a.billedNondiscHrs + a.billedDiscHrs).toBeCloseTo(0, 6);
+  });
+});
+
+describe("aggregateRealizationHours: $0-rate time and fee placeholders", () => {
+  const nameToUid = new Map<string, number>(roster.map((r) => [r.name.toLowerCase(), r.user_id]));
+  const NRN = 348755029;
+  const GHOLSTON = "02681-Gholston Sr., Ronald - Estate of";
+  // Shapes copied from the live Realization report for NRN, Mar/Apr 2025.
+  const live = (o: Record<string, string>) => ({
+    "Time Entry Date": "04/16/2025", User: "Nicholas Noe", "Time Entry Type": "Hourly",
+    "Invoice Status": "Billed", "Rate Type": "Custom rate", Rate: "400.0", Quantity: "0.2",
+    "Original Billable Total": "80.0", "Adjusted Hours": "0.0", "Hours Discounted": "0.0",
+    "Billed Hours": "0.2", "Matter Number": "02705-Lopez, Joaquin Peter - Estate of", ...o,
+  });
+  const zeroBilled = live({
+    "Time Entry Date": "03/12/2025", Rate: "0.0", Quantity: "1.0", "Original Billable Total": "0.0",
+    "Billed Hours": "0.0", "Matter Number": GHOLSTON,
+  });
+  const placeholder = live({
+    Rate: "56187.98", Quantity: "1.0", "Original Billable Total": "56187.98",
+    "Billed Hours": "1.0", "Matter Number": GHOLSTON,
+  });
+
+  it("backs a billed $0-rate row out of D/E/F instead of dumping it in unbilled", () => {
+    // Regression: Billed Hours 0.0 with nothing discounted used to trip the anomaly
+    // guard and land in col F as never-to-bill "unbilled" time.
+    const a = aggregateRealizationHours([zeroBilled, live({})], nameToUid)[NRN];
+    expect(a.unbilledHrs).toBeCloseTo(0, 6);
+    expect(a.billedNondiscHrs).toBeCloseTo(0.2, 6);
+    expect(a.billedDiscHrs).toBeCloseTo(0, 6);
+    expect(a.zeroRateHrs).toBeCloseTo(1.0, 6);
+  });
+
+  it("backs out unbilled $0-rate time too", () => {
+    const a = aggregateRealizationHours([
+      live({ "Invoice Status": "-", Rate: "0.0", Quantity: "2.5", "Original Billable Total": "0.0", "Billed Hours": "0.0" }),
+    ], nameToUid)[NRN];
+    expect(a.unbilledHrs).toBeCloseTo(0, 6);
+    expect(a.zeroRateHrs).toBeCloseTo(2.5, 6);
+  });
+
+  it("keeps a $0 row that still carries billable value (rate 0 alone is not enough)", () => {
+    const a = aggregateRealizationHours([
+      live({ Rate: "0.0", "Original Billable Total": "80.0" }),
+    ], nameToUid)[NRN];
+    expect(a.zeroRateHrs).toBeCloseTo(0, 6);
+    expect(a.billedNondiscHrs).toBeCloseTo(0.2, 6);
+  });
+
+  it("does not treat missing Rate / Original Billable Total columns as $0", () => {
+    // A schema change must not silently empty the tab.
+    const r: Record<string, string> = { ...live({}) };
+    delete r["Rate"]; delete r["Original Billable Total"];
+    const a = aggregateRealizationHours([r], nameToUid)[NRN];
+    expect(a.billedNondiscHrs).toBeCloseTo(0.2, 6);
+    expect(a.zeroRateHrs).toBeCloseTo(0, 6);
+  });
+
+  it("backs out a keyed fee placeholder from col D", () => {
+    const keys = new Set([placeholderKey(NRN, "2025-04-16", GHOLSTON, 56187.98)]);
+    const a = aggregateRealizationHours([placeholder, live({})], nameToUid, { placeholderKeys: keys })[NRN];
+    expect(a.billedNondiscHrs).toBeCloseTo(0.2, 6);
+    expect(a.placeholderHrs).toBeCloseTo(1.0, 6);
+  });
+
+  it("leaves the placeholder in col D when no keys are supplied (prior behavior)", () => {
+    const a = aggregateRealizationHours([placeholder], nameToUid)[NRN];
+    expect(a.billedNondiscHrs).toBeCloseTo(1.0, 6);
+    expect(a.placeholderHrs).toBeCloseTo(0, 6);
+  });
+
+  it("does not strip an unkeyed 1.0h row on the same matter and day", () => {
+    const keys = new Set([placeholderKey(NRN, "2025-04-16", GHOLSTON, 56187.98)]);
+    const other = live({ Rate: "39609.15", Quantity: "1.0", "Original Billable Total": "39609.15", "Billed Hours": "1.0", "Matter Number": GHOLSTON });
+    const a = aggregateRealizationHours([other], nameToUid, { placeholderKeys: keys })[NRN];
+    expect(a.billedNondiscHrs).toBeCloseTo(1.0, 6);
+  });
+});
+
+describe("placeholderKey / realizRowDate", () => {
+  it("converts the report's MM/DD/YYYY to the /activities date form", () => {
+    expect(realizRowDate("04/16/2025")).toBe("2025-04-16");
+    expect(realizRowDate("4/6/2025")).toBe("2025-04-06");
+    expect(realizRowDate("2025-04-16")).toBe("2025-04-16");
+  });
+  it("matches across float noise and matter-number case/whitespace", () => {
+    expect(placeholderKey(1, "2025-04-16", " 02681-Gholston ", 56187.98))
+      .toBe(placeholderKey(1, "2025-04-16", "02681-gholston", 56187.980000001));
   });
 });
