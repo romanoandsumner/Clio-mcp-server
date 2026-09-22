@@ -363,12 +363,53 @@ export function aggregateRealizationCollections(rows: Record<string, string>[], 
 // write-down (negative) still adds to the reduction bucket, and a write-up
 // subtracts, which is what makes standardValue == billed + discounted + unbilled
 // hold on a row where billed EXCEEDS standard value.
+//
+// TWO KINDS OF ROW ARE BACKED OUT of D/E/F entirely, because neither is billable
+// work valued at a rate:
+//
+//   $0-RATE TIME — billable-typed rows with Rate 0 and Original Billable Total 0,
+//   typically contingent work recorded at no charge. Verified live on the Gholston
+//   contingency invoice (#18792): these rows come back "Billed" with Billed Hours
+//   0.0 and nothing discounted, so they fell through to the anomaly guard below and
+//   landed in col F as "unbilled" — WIP that will never bill, plus a warning on
+//   every run. 26 Compare col I already reclassifies the same rate-0/amount-0 time
+//   out of billable; this makes the Realization tab agree.
+//
+//   FEE PLACEHOLDERS — the synthetic 1.0h entry that carries a whole contingency or
+//   flat fee (Gholston, 4/16/2025: 1.0h at $56,187.98). It bills in full, so it read
+//   as a fully realized hour in col D and pushed D/(D+E) up in the month a fee landed.
+//   Identified by `placeholderKeys`, built from the SAME matter-gated detection that
+//   backs placeholders out of col I (findFeePlaceholders), so the two tabs strip the
+//   same entries. Without keys, nothing is treated as a placeholder.
+//
+// Both are counted in their own fields so the exclusion stays auditable.
 export type RealizHoursAgg = {
   billedNondiscHrs: number;   // -> Realization tab col D
   billedDiscHrs: number;      // -> col E  (discounted + adjusted-down, less adjusted-up)
   unbilledHrs: number;        // -> col F
   adjustedHrs: number;        // the adjustment portion of col E, broken out for audit
+  zeroRateHrs: number;        // $0-rate billable time, excluded from D/E/F
+  placeholderHrs: number;     // fee-placeholder hours, excluded from D/E/F
 };
+
+/**
+ * Match key for a fee placeholder: user × work date (YYYY-MM-DD) × matter display
+ * number × rate to the cent. The Realization report carries no time-entry id, so this
+ * is how its rows are tied back to the placeholders found on /activities. A collision
+ * needs two 1.0h entries by one person, same day, same matter, same off-standard rate
+ * to the cent — and both would be placeholders anyway.
+ */
+export function placeholderKey(uid: number, date: string, matterNumber: string, rate: number): string {
+  return `${uid}|${date}|${matterNumber.trim().toLowerCase()}|${Math.round(rate * 100)}`;
+}
+
+/** Report "Time Entry Date" (MM/DD/YYYY) → YYYY-MM-DD, the /activities date form.
+ *  Anything else is returned trimmed and unchanged. */
+export function realizRowDate(s: string | undefined): string {
+  const t = (s ?? "").trim();
+  const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}` : t;
+}
 
 /** True when a Realization-report row has not reached an issued bill.
  *
@@ -389,6 +430,7 @@ export function isUnbilledRealizStatus(invoiceStatus: string | undefined): boole
 export function aggregateRealizationHours(
   rows: Record<string, string>[],
   nameToUid: Map<string, number>,
+  opts: { placeholderKeys?: Set<string> } = {},
 ): Record<number, RealizHoursAgg> {
   const num = (x: string | undefined) => parseFloat((x ?? "0").replace(/[$,]/g, "")) || 0;
   const out: Record<number, RealizHoursAgg> = {};
@@ -401,8 +443,23 @@ export function aggregateRealizationHours(
     if ((r["Time Entry Type"] ?? "").trim().toLowerCase() === "non-billable") continue;
     const uid = nameToUid.get((r["User"] ?? "").trim().toLowerCase());
     if (uid == null) continue;
-    const slot = (out[uid] ??= { billedNondiscHrs: 0, billedDiscHrs: 0, unbilledHrs: 0, adjustedHrs: 0 });
+    const slot = (out[uid] ??= {
+      billedNondiscHrs: 0, billedDiscHrs: 0, unbilledHrs: 0, adjustedHrs: 0, zeroRateHrs: 0, placeholderHrs: 0,
+    });
     const qty = num(r["Quantity"]);
+    const rate = num(r["Rate"]);
+    // $0-rate time and fee placeholders: see the note above RealizHoursAgg. The
+    // $0 test requires both columns to be PRESENT — if Clio ever drops or renames
+    // them, a missing cell must not read as zero and empty the whole tab.
+    if (r["Rate"] !== undefined && r["Original Billable Total"] !== undefined
+        && rate === 0 && num(r["Original Billable Total"]) === 0) {
+      slot.zeroRateHrs += qty;
+      continue;
+    }
+    if (opts.placeholderKeys?.has(placeholderKey(uid, realizRowDate(r["Time Entry Date"]), r["Matter Number"] ?? "", rate))) {
+      slot.placeholderHrs += qty;
+      continue;
+    }
     const billedHrs = num(r["Billed Hours"]);
     const discHrs = Math.abs(num(r["Hours Discounted"]));
     // Signed, not absolute: see the note above. A negative Adjusted Hours is a
@@ -517,6 +574,8 @@ export async function fetchRealizationHours(opts: {
   clientActivityReportId?: number;
   realizationReportId?: number;
   pollSeconds?: number;
+  /** placeholderKey()s of the fee placeholders to back out of D/E/F. */
+  placeholderKeys?: Set<string>;
 }): Promise<{
   agg: Record<number, RealizHoursAgg>;
   /** Per-timekeeper dollars from the SAME rows — empty on the legacy path, whose
@@ -539,6 +598,8 @@ export async function fetchRealizationHours(opts: {
         billedDiscHrs: a.billedDiscHrs,
         unbilledHrs: a.unbilledHrs,
         adjustedHrs: 0,
+        zeroRateHrs: 0,
+        placeholderHrs: 0,
       };
     }
     return { agg, dollars: {}, clientActivityReportId: ca.report.id };
@@ -548,7 +609,7 @@ export async function fetchRealizationHours(opts: {
     reportId: opts.realizationReportId, pollSeconds,
   });
   return {
-    agg: aggregateRealizationHours(rr.rows, opts.nameToUid),
+    agg: aggregateRealizationHours(rr.rows, opts.nameToUid, { placeholderKeys: opts.placeholderKeys }),
     dollars: aggregateRealizationDollars(rr.rows, opts.nameToUid),
     realizationReportId: rr.report.id,
   };

@@ -4,7 +4,7 @@ import { computeBonusData, reconcileBonusConfig, FIRM_BONUS_ATTORNEYS, MNH_SPLIT
 import { buildNonbillableByMonth } from "../dashboard/nonbillable";
 import { buildMonthlyCollections } from "../dashboard/collections";
 import { buildMonthlyBilled } from "../dashboard/billed";
-import { buildExcludedHoursByMonth } from "../dashboard/excludedHours";
+import { buildExcludedHoursByMonth, feePlaceholderKeys } from "../dashboard/excludedHours";
 import {
   classifyYtdTimeEntries, addToTotals, emptyTotals,
   type ClassifiedTimeEntry, type HoursTotals,
@@ -82,6 +82,7 @@ import {
   aggregateClientActivity,
   fetchRealizationHours,
   type RealizDollarsAgg,
+  type RealizHoursAgg,
   getRevenueReportCSV,
   matchRosterUser,
   matchRosterResponsible,
@@ -571,6 +572,14 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
   console.warn(`[Doc] generate_weekly_goals — returning direct_download_url filename=${filename} size_kb=${size_kb}`);
   const reg = registerDownload(buffer, filename, mimeForFilename(filename));
   return { filename, size_kb, direct_download_url: reg.url, expires_at: reg.expires_at, figures };
+}
+
+// Roster-wide $0-rate and fee-placeholder hours a month's Realization tab backed out
+// of D/E/F (see aggregateRealizationHours), rounded for the tool result.
+function sumRealizExcluded(agg: Record<number, RealizHoursAgg>): { zero_rate_hrs: number; placeholder_hrs: number } {
+  let z = 0, p = 0;
+  for (const a of Object.values(agg)) { z += a.zeroRateHrs; p += a.placeholderHrs; }
+  return { zero_rate_hrs: round1(z), placeholder_hrs: round1(p) };
 }
 
 // ─── ROSTER (hardcoded for batch weekly goals, grouped by team) ──
@@ -1355,7 +1364,7 @@ export function registerDocumentTools(server: McpServer): void {
   // ============================================================
   server.tool(
     "download_dashboard_update",
-    "Update Rachel's firm dashboard (the 'Claude Version 2' workbook in Box) for the specified month. Sources actual billed figures (billed $, write-offs, line discounts, billable hours — by timekeeper AND responsible attorney), not a hours×rate reconstruction. Revenue source, in priority order: (1) revenue_csv_box_file_id — a month×user 'Revenue Report (Like Classic)' CSV in Box (covers all YTD months in one file); (2) revenue_report_id — same month×user shape from Clio /reports; (3) DEFAULT — replicates Rachel's manual classic method: generates a per-timekeeper classic revenue report for each roster member plus one firm-wide report, for the TARGET MONTH only, on demand (revenue honors the date range). Nonbillable category columns D/E/F/G come from a targeted /activities query on the admin matters (Biz Dev 00706 + Website 00316, Potential Clients 00050, CLE 00707, Other Admin 02888) — an informational breakdown only; TNB col H is the TOTAL of nonbillable time on the ADJUSTED basis: entries flagged non-billable in Clio, PLUS firm-internal time reclassified out of billable (see col I) — so col H can exceed D+E+F+G when internal matters outside the four categories carry flagged non-billable or firm-internal time; collections from per-month PAYMENT-FILTERED Fee Allocation reports (payment-received basis). The month×user sources rewrite all YTD months; the classic default writes the target month only (for hours/billed). Each nonbillable category is the time booked to its admin matter(s); Other Admin = matter 02888-Admin. Collections come from PAYMENT-FILTERED Fee Allocation reports (filter_by_payment=true) generated one-per-month — money actually received each month, FEES ONLY (Billed Time Collected; excludes collected expenses/interest/tax), allocated by working timekeeper (col N 'Collected Actual'), by RESPONSIBLE attorney (col S 'Collected Actual' under the Responsible Attorney group), and by ORIGINATING attorney (col V 'Originating'). Fees from billers / responsible / originating attorneys not on the roster are pooled into the 'NRB' row so Σ col N == Σ col S == Σ col V == firm fees. This is the payment-received basis: it captures payments on prior-year invoices; each month's report period is verified (assertReportPeriod) before it is written. Billed $ (col K) is on the INVOICE-ISSUE-DATE basis (the Billed Time that appeared on bills issued that month — issued invoices only, no unbilled WIP), from one per-month Fee Allocation report, with a configurable billing-month cutoff (billed_cutoff_day, default 0 = count each bill in its calendar issue month, matching Rachel; set N>0 to roll bills issued in the first N days of a month back into the prior month's run). Billable Hours (col I) is ALL hours WORKED that month whose Clio non_billable flag is false AND which are not FIRM-INTERNAL (activity/work-date basis, billed or not), minus ONLY Rachel's synthetic 1-hour contingency/flat fee-placeholder entries (single-hour billable-flagged entries whose rate doesn't match the timekeeper's standard hourly rate); real RATED worked time on contingency/flat matters still counts, and the fee dollars still count in col K and in collections. FIRM-INTERNAL (excluded from col I, moved into col H, when exclude_internal is true — the DEFAULT) means either (a) the matter's client is the firm itself, Romano & Sumner, LLC — the structural signal, catching 02888-Admin, 00050-Potential Clients and any future internal matter automatically — or (b) the entry is billable-flagged but carries rate 0 AND amount 0, the rate-based safety net. So the matter's CLIENT and the entry's RATE/AMOUNT ARE now consulted for billable classification; matter names, numbers, types and practice areas still never are. The adjustment MOVES hours from col I to col H, so col J (total worked) and the Utilization tab's Untracked column are unaffected. Set exclude_internal=false for the legacy flag-only col I. The PARALEGAL HOURS BONUS uses col I, so it is on the adjusted basis too — $0-rate and firm-internal hours do not count toward bonus hours. Each run logs the raw→adjusted col I delta per month. (fee_report_id is deprecated/ignored — the Collection tab now generates its own per-month report; see below.) By default writes ONLY the target month's hours/billable/billed/write-off/discount/collections columns in '26 Compare' (a STATIC monthly snapshot — prior closed months are never changed retroactively); pass backfill_ytd=true for a one-time historical rewrite of all YTD months. Then rebuilds the Bonus Config/Tracker and Attorney Performance tabs and versions the file back to Box. ALSO patches the 'Utilization' tab (billable = worked billable hours; nonbillable = flagged non-billable hours — the SAME figures as 26 Compare cols I and H, NOT the Client Activity Price==0 heuristic, which under-counted nonbillable and collapsed it to ~0; the Total and Untracked columns are recomputed from Billable+Nonbillable so they can't drift from the patched hours) and the 'Realization' tab (billed-nondiscounted/billed-discounted/unbilled hours, from auto-generated Clio Client Activity reports — one per month patched) — pass client_activity_report_id to use a specific pre-generated Client Activity report for the Realization tab (target month only). ALSO patches the 'Collection' tab (Collected / Uncollected HOURS), derived by default from a SINGLE-MONTH Fee Allocation report per patched month (per-user Billed Hours allocated to collected vs uncollected by the Billed Time Collected/Outstanding dollar split) — per-month, NOT the old cumulative YTD report that summed every month into each block (the Feb/Mar blow-up); pass realization_report_id to instead source the target month from a specific pre-generated Realization report. All three rate tabs honor backfill_ytd: a normal run patches only the TARGET month's block, while backfill_ytd=true re-derives EVERY YTD month block (generating one Client Activity / Fee Allocation report per month) — use it for a one-time historical correction of stale months. Report generation (Client Activity for Util/Realiz) auto-retries on transient failures and each tab patches independently — a failure in one tab no longer aborts the others; the result reports per-tab status (ok/failed/skipped) and the report ids used. ALSO appends a 'Firm Average' summary table to the BOTTOM of the 'Utilization', 'Realization' and 'Collection' tabs (the Realization and Collection tables carry a 'data as of' date, because a maturing cohort read at two dates gives two different, both correct, numbers): one row per month with the firm-wide rate computed as the simple MEAN of the listed billers' own monthly rate (utilization = billable/available; realization = nondiscounted/total-billed), excluding inactive timekeepers (no hours / #DIV/0!). The Utilization table also includes a 'Firm Avg Util Goal' column — the mean of each biller's own utilization goal from the '2026 Goals' tab — so actual can be charted against goal. It is appended after the existing month blocks (never inserted mid-sheet, so the template's per-attorney formulas are untouched) and refreshed in place each run, and is regenerated as static values from the hour columns. The workbook is set to fully recalculate on open so the rate/total formulas refresh automatically. Pass revenue_report_id to force a specific revenue report if auto-selection picks the wrong one. If the Box upload fails, returns a short-lived direct_download_url (1-hour TTL) instead.",
+    "Update Rachel's firm dashboard (the 'Claude Version 2' workbook in Box) for the specified month. Sources actual billed figures (billed $, write-offs, line discounts, billable hours — by timekeeper AND responsible attorney), not a hours×rate reconstruction. Revenue source, in priority order: (1) revenue_csv_box_file_id — a month×user 'Revenue Report (Like Classic)' CSV in Box (covers all YTD months in one file); (2) revenue_report_id — same month×user shape from Clio /reports; (3) DEFAULT — replicates Rachel's manual classic method: generates a per-timekeeper classic revenue report for each roster member plus one firm-wide report, for the TARGET MONTH only, on demand (revenue honors the date range). Nonbillable category columns D/E/F/G come from a targeted /activities query on the admin matters (Biz Dev 00706 + Website 00316, Potential Clients 00050, CLE 00707, Other Admin 02888) — an informational breakdown only; TNB col H is the TOTAL of nonbillable time on the ADJUSTED basis: entries flagged non-billable in Clio, PLUS firm-internal time reclassified out of billable (see col I) — so col H can exceed D+E+F+G when internal matters outside the four categories carry flagged non-billable or firm-internal time; collections from per-month PAYMENT-FILTERED Fee Allocation reports (payment-received basis). The month×user sources rewrite all YTD months; the classic default writes the target month only (for hours/billed). Each nonbillable category is the time booked to its admin matter(s); Other Admin = matter 02888-Admin. Collections come from PAYMENT-FILTERED Fee Allocation reports (filter_by_payment=true) generated one-per-month — money actually received each month, FEES ONLY (Billed Time Collected; excludes collected expenses/interest/tax), allocated by working timekeeper (col N 'Collected Actual'), by RESPONSIBLE attorney (col S 'Collected Actual' under the Responsible Attorney group), and by ORIGINATING attorney (col V 'Originating'). Fees from billers / responsible / originating attorneys not on the roster are pooled into the 'NRB' row so Σ col N == Σ col S == Σ col V == firm fees. This is the payment-received basis: it captures payments on prior-year invoices; each month's report period is verified (assertReportPeriod) before it is written. Billed $ (col K) is on the INVOICE-ISSUE-DATE basis (the Billed Time that appeared on bills issued that month — issued invoices only, no unbilled WIP), from one per-month Fee Allocation report, with a configurable billing-month cutoff (billed_cutoff_day, default 0 = count each bill in its calendar issue month, matching Rachel; set N>0 to roll bills issued in the first N days of a month back into the prior month's run). Billable Hours (col I) is ALL hours WORKED that month whose Clio non_billable flag is false AND which are not FIRM-INTERNAL (activity/work-date basis, billed or not), minus ONLY Rachel's synthetic 1-hour contingency/flat fee-placeholder entries (single-hour billable-flagged entries whose rate doesn't match the timekeeper's standard hourly rate); real RATED worked time on contingency/flat matters still counts, and the fee dollars still count in col K and in collections. FIRM-INTERNAL (excluded from col I, moved into col H, when exclude_internal is true — the DEFAULT) means either (a) the matter's client is the firm itself, Romano & Sumner, LLC — the structural signal, catching 02888-Admin, 00050-Potential Clients and any future internal matter automatically — or (b) the entry is billable-flagged but carries rate 0 AND amount 0, the rate-based safety net. So the matter's CLIENT and the entry's RATE/AMOUNT ARE now consulted for billable classification; matter names, numbers, types and practice areas still never are. The adjustment MOVES hours from col I to col H, so col J (total worked) and the Utilization tab's Untracked column are unaffected. Set exclude_internal=false for the legacy flag-only col I. The PARALEGAL HOURS BONUS uses col I, so it is on the adjusted basis too — $0-rate and firm-internal hours do not count toward bonus hours. Each run logs the raw→adjusted col I delta per month. (fee_report_id is deprecated/ignored — the Collection tab now generates its own per-month report; see below.) By default writes ONLY the target month's hours/billable/billed/write-off/discount/collections columns in '26 Compare' (a STATIC monthly snapshot — prior closed months are never changed retroactively); pass backfill_ytd=true for a one-time historical rewrite of all YTD months. Then rebuilds the Bonus Config/Tracker and Attorney Performance tabs and versions the file back to Box. ALSO patches the 'Utilization' tab (billable = worked billable hours; nonbillable = flagged non-billable hours — the SAME figures as 26 Compare cols I and H, NOT the Client Activity Price==0 heuristic, which under-counted nonbillable and collapsed it to ~0; the Total and Untracked columns are recomputed from Billable+Nonbillable so they can't drift from the patched hours) and the 'Realization' tab (billed-nondiscounted/billed-discounted/unbilled hours, from auto-generated Clio Realization reports — one per month patched; $0-rate billable time and the synthetic 1-hour fee placeholders — the same matter-gated set col I backs out — are excluded from all three columns, and the result's realization_excluded_hours reports what was backed out per month) — pass client_activity_report_id to use a specific pre-generated Client Activity report for the Realization tab (target month only). ALSO patches the 'Collection' tab (Collected / Uncollected HOURS), derived by default from a SINGLE-MONTH Fee Allocation report per patched month (per-user Billed Hours allocated to collected vs uncollected by the Billed Time Collected/Outstanding dollar split) — per-month, NOT the old cumulative YTD report that summed every month into each block (the Feb/Mar blow-up); pass realization_report_id to instead source the target month from a specific pre-generated Realization report. All three rate tabs honor backfill_ytd: a normal run patches only the TARGET month's block, while backfill_ytd=true re-derives EVERY YTD month block (generating one Client Activity / Fee Allocation report per month) — use it for a one-time historical correction of stale months. Report generation (Client Activity for Util/Realiz) auto-retries on transient failures and each tab patches independently — a failure in one tab no longer aborts the others; the result reports per-tab status (ok/failed/skipped) and the report ids used. ALSO appends a 'Firm Average' summary table to the BOTTOM of the 'Utilization', 'Realization' and 'Collection' tabs (the Realization and Collection tables carry a 'data as of' date, because a maturing cohort read at two dates gives two different, both correct, numbers): one row per month with the firm-wide rate computed as the simple MEAN of the listed billers' own monthly rate (utilization = billable/available; realization = nondiscounted/total-billed), excluding inactive timekeepers (no hours / #DIV/0!). The Utilization table also includes a 'Firm Avg Util Goal' column — the mean of each biller's own utilization goal from the '2026 Goals' tab — so actual can be charted against goal. It is appended after the existing month blocks (never inserted mid-sheet, so the template's per-attorney formulas are untouched) and refreshed in place each run, and is regenerated as static values from the hour columns. The workbook is set to fully recalculate on open so the rate/total formulas refresh automatically. Pass revenue_report_id to force a specific revenue report if auto-selection picks the wrong one. If the Box upload fails, returns a short-lived direct_download_url (1-hour TTL) instead.",
     {
       month: z.coerce.number().describe("Month number (1-12)"),
       year: z.coerce.number().describe("Year (e.g. 2026)"),
@@ -1470,6 +1479,8 @@ export function registerDocumentTools(server: McpServer): void {
           let clientActivityReportId: number | undefined;
           let clientActivityErr: string | undefined, realizationErr: string | undefined;
           const realizDollars: DollarsByMonth = {};
+          // Per-month hours backed out of the Realization tab's D/E/F, for the result.
+          const realizExcluded: Record<string, { zero_rate_hrs: number; placeholder_hrs: number }> = {};
 
           // -- Utilization -- from 26 Compare col I/H (read-only; no Clio pull)
           _step = "rate-tabs-only: patch Utilization";
@@ -1508,6 +1519,9 @@ export function registerDocumentTools(server: McpServer): void {
             try { realizXml = await origZip.file(realizPath)!.async("string"); } catch { realizXml = undefined; }
           }
           if (realizXml) {
+            // Fee placeholders to back out of D/E/F — the same matter-gated set
+            // 26 Compare col I strips (see aggregateRealizationHours).
+            const placeholderKeys = await feePlaceholderKeys(params.year, rtMonths, ROSTER);
             for (const m of rtMonths) {
               const mStart = `${params.year}-${String(m).padStart(2, "0")}-01`;
               const mEnd = `${params.year}-${String(m).padStart(2, "0")}-${String(new Date(params.year, m, 0).getDate()).padStart(2, "0")}`;
@@ -1516,8 +1530,10 @@ export function registerDocumentTools(server: McpServer): void {
                   start_date: mStart, end_date: mEnd, nameToUid,
                   legacy: params.realization_hours_source === "client_activity",
                   clientActivityReportId: m === params.month ? params.client_activity_report_id : undefined,
+                  placeholderKeys,
                 });
                 const agg = fetched.agg;
+                realizExcluded[MONTH_ABBRS[m - 1]] = sumRealizExcluded(agg);
                 if (Object.keys(fetched.dollars).length) realizDollars[m] = fetched.dollars;
                 if (m === params.month && fetched.clientActivityReportId) clientActivityReportId = fetched.clientActivityReportId;
                 const ensured = ensureTabMonthBlock(realizXml, MONTH_ABBRS[m - 1], sharedStrings, ["D", "E", "F"]);
@@ -1619,6 +1635,7 @@ export function registerDocumentTools(server: McpServer): void {
             note: "Only Utilization / Realization / Collection were rewritten; 26 Compare and all other tabs were left untouched.",
             utilization_patched: utilPatched,
             realization_patched: realizPatched,
+            realization_excluded_hours: realizExcluded,
             collection_patched: collectionPatched,
             collection_source: "fee_allocation_monthly",
             client_activity_report_id: clientActivityReportId,
@@ -2833,6 +2850,8 @@ export function registerDocumentTools(server: McpServer): void {
           // Dollars for the "Realization ($)" tab, harvested from the SAME
           // per-month report rows as the hours above — no extra Clio call.
           const realizDollars: DollarsByMonth = {};
+          // Per-month hours backed out of the Realization tab's D/E/F, for the result.
+          const realizExcluded: Record<string, { zero_rate_hrs: number; placeholder_hrs: number }> = {};
           const realizPath = compareSheetMap["Realization"];
           if (realizPath) {
             try {
@@ -2843,6 +2862,9 @@ export function registerDocumentTools(server: McpServer): void {
             }
           }
           if (realizXml) {
+            // Fee placeholders to back out of D/E/F — the same matter-gated set
+            // 26 Compare col I strips (see aggregateRealizationHours).
+            const placeholderKeys = await feePlaceholderKeys(params.year, realizMonths, ROSTER);
             for (const m of realizMonths) {
               const { start: mStart, end: mEnd } = monthBounds(m);
               try {
@@ -2853,8 +2875,10 @@ export function registerDocumentTools(server: McpServer): void {
                   // Same report kind and same month as the Collection tab's
                   // override, so reuse it instead of POSTing a duplicate.
                   realizationReportId: m === params.month ? params.realization_report_id : undefined,
+                  placeholderKeys,
                 });
                 const agg = fetched.agg;
+                realizExcluded[MONTH_ABBRS[m - 1]] = sumRealizExcluded(agg);
                 if (Object.keys(fetched.dollars).length) realizDollars[m] = fetched.dollars;
                 if (m === params.month) {
                   if (fetched.clientActivityReportId) clientActivityReportId = fetched.clientActivityReportId;
@@ -3352,6 +3376,7 @@ export function registerDocumentTools(server: McpServer): void {
             attorneys_tracked: attys.length,
             utilization_patched: utilPatched,
             realization_patched: realizPatched,
+            realization_excluded_hours: realizExcluded,
             collection_patched: collectionPatched,
             collection_source: collectionSource,
             client_activity_report_id: clientActivityReportId,
