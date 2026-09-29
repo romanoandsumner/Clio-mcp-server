@@ -23,6 +23,8 @@ export function buildQueryString(params: Record<string, any>): string {
   return parts.join("&");
 }
 
+const RAW_GET_IDLE_TIMEOUT_MS = 30_000;
+
 /**
  * Make a raw HTTPS GET request, bypassing axios entirely.
  * Axios mangles curly braces in URLs which breaks Clio field syntax.
@@ -66,6 +68,12 @@ function rawGet(fullUrl: string): Promise<any> {
       });
     });
 
+    // Idle (socket-inactivity) timeout, not a total-duration cap: a response
+    // that keeps streaming is never cut off, but a connection that goes silent
+    // fails with a clear error instead of hanging until the MCP client gives up.
+    req.setTimeout(RAW_GET_IDLE_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Clio GET timed out after ${RAW_GET_IDLE_TIMEOUT_MS / 1000}s of inactivity: ${parsed.pathname}`));
+    });
     req.on("error", reject);
     req.end();
   });

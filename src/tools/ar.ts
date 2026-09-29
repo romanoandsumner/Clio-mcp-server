@@ -42,6 +42,14 @@ const SCORECARD_BILL_FIELDS =
 // classify; practice_area{name} is the proven form (see audit.ts).
 const SCORECARD_MATTER_FIELDS = "id,practice_area{name}";
 
+// Paid bills are fetched ONLY to mark trust requests funded — no AR figure
+// reads them. An unfiltered state=paid sweep pulls every fee invoice the firm
+// has ever been paid (with matter/client/attorney sub-objects), which is what
+// timed the scorecard out; type=trust (GET /bills enum: revenue|trust) drops
+// those server-side while keeping the full funded-request history. All AR and
+// every unfunded request still come from awaiting_payment, unfiltered.
+const SCORECARD_PAID_TRUST_PARAMS = { fields: SCORECARD_BILL_FIELDS, state: "paid", type: "trust" };
+
 // ====================================================================
 // AR track classification (Gated vs. Non-Gated)
 // --------------------------------------------------------------------
@@ -768,8 +776,8 @@ export function registerARTools(server: McpServer): void {
 
         const [awaitingBills, paidBills, allMatters, wipData] = await Promise.all([
           fetchAllPages<any>("/bills", { fields: SCORECARD_BILL_FIELDS, state: "awaiting_payment" }),
-          fetchAllPages<any>("/bills", { fields: SCORECARD_BILL_FIELDS, state: "paid" }).catch((e: any) => {
-            console.warn(`[get_ar_scorecard] paid-bills fetch failed (${e?.message ?? e}); funded trust requests will be incomplete`);
+          fetchAllPages<any>("/bills", SCORECARD_PAID_TRUST_PARAMS).catch((e: any) => {
+            console.warn(`[get_ar_scorecard] paid trust-request fetch failed (${e?.message ?? e}); funded trust requests will be incomplete`);
             return [] as any[];
           }),
           // Join key for the Gated/Non-Gated split. We need ALL matters (open
