@@ -200,6 +200,30 @@ beforeEach(() => {
 });
 
 // ==========================================================================
+describe("get_ar_scorecard — Clio fetch scope", () => {
+  const billCalls = () =>
+    paginationMocks.fetchAllPages.mock.calls.filter(([path]: any[]) => path === "/bills").map(([, p]: any[]) => p);
+
+  it("fetches paid bills as trust-only so the sweep skips every paid fee invoice", async () => {
+    await scorecard();
+    const paid = billCalls().filter((p) => p.state === "paid");
+    expect(paid).toHaveLength(1);
+    expect(paid[0].type).toBe("trust");
+  });
+
+  it("never filters the AR (awaiting_payment) fetch by type or date, so years-old open invoices stay in", async () => {
+    const out = await scorecard();
+    const awaiting = billCalls().filter((p) => p.state === "awaiting_payment");
+    expect(awaiting).toHaveLength(1);
+    for (const k of ["type", "issued_after", "created_since", "updated_since", "due_after"]) {
+      expect(awaiting[0][k], k).toBeUndefined();
+    }
+    // The 1800-day fixture invoice still lands in 360+.
+    expect(out.firm.discrete_buckets.days_over_360.count).toBeGreaterThan(0);
+  });
+});
+
+// ==========================================================================
 describe("get_ar_scorecard — aging buckets", () => {
   it("sums the discrete buckets to total_ar at the firm level, to the cent", async () => {
     const out = await scorecard();
