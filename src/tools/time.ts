@@ -4,6 +4,7 @@ import { fetchAllPages, rawPostSingle, rawPatchSingle, rawGetSingle } from "../c
 import { patchTimeEntrySmart, resolveActivityRouting, removeFromDraftBill, deleteActivity, discountLineItem, prepareLineSplit, mergeLineItems, prepareHourChange, prepareHardCombine, assertNewHoursSane } from "../clio/lineItems";
 import { resolveActingUserId, AttributionError } from "../clio/actingUser";
 import { diagnosticTool } from "../utils/diagnostics";
+import { runBulk, parseIdList, BULK_MAX_ITEMS, BULK_DEFAULT_BUDGET_SECONDS, BULK_MAX_BUDGET_SECONDS } from "../clio/bulk";
 
 const TIME_ENTRY_FIELDS =
   "id,date,created_at,updated_at,quantity,rounded_quantity,price,total,note,type,billed,matter{id,display_number,description,client},user{id,name}";
@@ -902,6 +903,100 @@ export function registerTimeTools(server: McpServer): void {
         };
       }
     }
+  );
+
+  // bulk_discount_line_items — discount_line_item over many lines (or every
+  // line on one draft bill) at a single percentage. Per-line failures are
+  // isolated; a time budget keeps the call under the connector timeout.
+  server.tool(
+    "bulk_discount_line_items",
+    `Apply the same percentage discount to many line items on DRAFT bills in one call — e.g. discount_pct=100 to write off a set of lines. Each line goes through the same path as discount_line_item (draft-only guard, original rate preserved, read-back verification that Clio actually applied it). Provide exactly one of: line_item_ids_csv (explicit lines) or bill_id (every line on that draft bill; expense lines and lines already at $0 are skipped unless include_expenses=true). Up to ${BULK_MAX_ITEMS} lines per call. Per-line failures never abort the rest. A time budget (max_seconds, default ${BULK_DEFAULT_BUDGET_SECONDS}) stops new lines from starting before the connector times out; anything not started comes back in not_attempted — re-call with just those IDs. Order of processing is not guaranteed.`,
+    {
+      line_item_ids_csv: z.string().optional().describe("Comma-separated line_item IDs, e.g. '8261110371,8261110372'. Duplicates are dropped."),
+      bill_id: z.coerce.number().optional().describe("Discount every eligible line on this DRAFT bill instead of passing IDs."),
+      discount_pct: z.coerce.number().describe("Percentage off each line's total (0-100). 100 writes the line off to $0."),
+      include_expenses: z.boolean().optional().default(false).describe("bill_id mode only: also discount expense lines (default false)."),
+      max_seconds: z.coerce.number().optional().describe(`Time budget before no new lines are started (default ${BULK_DEFAULT_BUDGET_SECONDS}, max ${BULK_MAX_BUDGET_SECONDS}).`),
+    },
+    async (params) => {
+      const fail = (message: string, extra: Record<string, unknown> = {}) => ({
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, message, ...extra }) }],
+        isError: true,
+      });
+      if ((params.line_item_ids_csv === undefined) === (params.bill_id === undefined)) {
+        return fail("Provide exactly one of line_item_ids_csv or bill_id.");
+      }
+      if (!(params.discount_pct >= 0 && params.discount_pct <= 100)) {
+        return fail(`discount_pct must be between 0 and 100 (got ${params.discount_pct}).`);
+      }
+
+      let ids: number[];
+      let skipped: Array<{ line_item_id: number; reason: string }> = [];
+      try {
+        if (params.line_item_ids_csv !== undefined) {
+          ids = parseIdList(params.line_item_ids_csv);
+        } else {
+          const billResp = await rawGetSingle(`/bills/${params.bill_id}`, { fields: "id,number,state" });
+          const bill = billResp.data;
+          if (!bill) return fail(`Bill ${params.bill_id} not found.`);
+          if (bill.state !== "draft") {
+            return fail(`Refusing: bill ${bill.number ?? params.bill_id} is "${bill.state}", not "draft".`, { bill_state: bill.state });
+          }
+          const lines = await fetchAllPages<any>("/line_items", {
+            bill_id: params.bill_id,
+            fields: "id,kind,total",
+          });
+          const eligible: number[] = [];
+          for (const li of lines) {
+            if (!params.include_expenses && li.kind === "Expense") {
+              skipped.push({ line_item_id: li.id, reason: "expense_line" });
+            } else if (!(Number(li.total) > 0)) {
+              skipped.push({ line_item_id: li.id, reason: "already_zero_total" });
+            } else {
+              eligible.push(li.id);
+            }
+          }
+          if (eligible.length === 0) return fail(`Bill ${params.bill_id} has no eligible lines to discount.`, { skipped });
+          if (eligible.length > BULK_MAX_ITEMS) {
+            return fail(
+              `Bill ${params.bill_id} has ${eligible.length} eligible lines, over the ${BULK_MAX_ITEMS}-per-call cap. Pass line_item_ids_csv in batches.`,
+              { eligible_line_item_ids: eligible },
+            );
+          }
+          ids = eligible;
+        }
+      } catch (err: any) {
+        return fail(err.message, { status: err.response?.status, clio_error: err.response?.data });
+      }
+
+      const outcome = await runBulk(
+        ids,
+        async (id) => {
+          const r = await discountLineItem({ line_item_id: id, discount_pct: params.discount_pct });
+          return {
+            bill: r.bill,
+            activity_id: r.activity_id,
+            before_total: r.before.total,
+            after_total: r.after?.total,
+            discount_amount_applied: r.discount_amount_applied,
+            discount_pct_applied: r.discount_pct_applied,
+          };
+        },
+        { budgetSeconds: params.max_seconds },
+      );
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            success: outcome.summary.failed === 0 && outcome.summary.not_attempted === 0,
+            discount_pct: params.discount_pct,
+            ...(skipped.length ? { skipped } : {}),
+            ...outcome,
+          }, null, 2),
+        }],
+        ...(outcome.summary.failed > 0 ? { isError: true } : {}),
+      };
+    },
   );
 
   // prepare_line_split — split a line on a draft bill into multiple
