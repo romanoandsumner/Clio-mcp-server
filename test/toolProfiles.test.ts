@@ -90,7 +90,7 @@ function allRegisteredToolNames(): string[] {
 const MUTATING_PREFIXES = [
   "create_", "update_", "delete_", "set_", "apply_", "prepare_", "merge_",
   "remove_", "convert_", "discount_", "expire_", "mark_", "upload_", "log_",
-  "start_", "stop_", "add_", "render_", "reconcile_",
+  "start_", "stop_", "add_", "render_", "reconcile_", "bulk_",
 ];
 
 describe("tool profiles", () => {
