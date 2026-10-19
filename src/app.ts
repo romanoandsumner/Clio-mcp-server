@@ -50,6 +50,7 @@ import { registerBillSentTools } from "./tools/billSent";
 import reviewRouter from "./routes/review";
 import uploadRouter from "./routes/upload";
 import { getDownload } from "./utils/downloadStore";
+import { CLIO_ICON_PNG, CLIO_ICON_DATA_URI } from "./branding/clioIcon";
 
 // --- MCP Server Factory ---
 // A fresh McpServer is created for every POST /mcp (see the stateless
@@ -61,7 +62,12 @@ export function createMcpServer(profile: ToolProfile = "full"): McpServer {
   try {
     const server = new McpServer({
       name: "clio-mcp",
+      title: "Clio",
       version: "1.2.0",
+      icons: [
+        { src: `${ENV.PUBLIC_BASE_URL.replace(/\/$/, "")}/icon.png`, mimeType: "image/png", sizes: ["192x192"] },
+        { src: CLIO_ICON_DATA_URI, mimeType: "image/png", sizes: ["192x192"] },
+      ],
     });
 
     // Must precede every register* call: the profile filters registration
@@ -297,6 +303,27 @@ export function createApp(): express.Express {
       git_branch: DEPLOY_BRANCH,
       started_at: STARTED_AT,
     });
+  });
+
+  // --- Branding: Clio favicon ---
+  // Connector UIs pull the favicon of the server's host; without one they fall
+  // back to the parent domain's (Railway's). No auth — it's a public image.
+  const sendIcon = (_req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.type("image/png").send(CLIO_ICON_PNG);
+  };
+  for (const path of ["/favicon.ico", "/favicon.png", "/icon.png", "/apple-touch-icon.png"]) {
+    app.get(path, sendIcon);
+  }
+  app.get("/", (_req, res) => {
+    res
+      .type("html")
+      .send(
+        '<!doctype html><html><head><meta charset="utf-8"><title>Clio MCP</title>' +
+          '<link rel="icon" type="image/png" href="/favicon.png">' +
+          '<link rel="apple-touch-icon" href="/apple-touch-icon.png"></head>' +
+          "<body>Clio MCP server</body></html>"
+      );
   });
 
   // --- Token-addressed file downloads (Box upload fallback) ---
