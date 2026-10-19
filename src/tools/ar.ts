@@ -2,6 +2,8 @@ import { z } from "zod/v4";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import ExcelJS from "exceljs";
 import { fetchAllPages } from "../clio/pagination";
+import { round2 } from "../utils/num";
+import { isTrustAccount, summarizeTrustByMatter, reconcileTrustAccounts } from "../domain/trust";
 import { uploadToBox, createBoxFile, findBoxFileId, downloadFromBox } from "../utils/box";
 import {
   DISCRETE_BUCKETS,
@@ -26,8 +28,9 @@ const AR_SCORECARD_FILENAME = "AR Scorecard.xlsx";
 const BILL_FIELDS =
   "id,number,issued_at,due_at,balance,total,kind,state,matters";
 
-// trust_line_items has limited fields — use defaults + matter association
-const TRUST_FIELDS = "id,date,total,matter{id,display_number,client}";
+// Trust ledger rows: see src/domain/trust.ts for why this is /bank_transactions
+// and not /trust_line_items.
+const TRUST_TX_FIELDS = "id,date,amount,description,source,matter{id,display_number},bank_account{id},bill{id}";
 
 // Scorecard fetch needs matter sub-objects (client/responsible_attorney) plus
 // `kind` (revenue_kind = true AR for services; trust_kind = trust/retainer
@@ -319,7 +322,7 @@ export function registerARTools(server: McpServer): void {
   // get_ar_aging
   server.tool(
     "get_ar_aging",
-    "Full accounts receivable aging report. Counts ONLY revenue_kind fee bills; trust/retainer funding requests (trust_kind) are advance-deposit requests, not receivables, and are excluded. Ages every open invoice by days_outstanding (days past due_at, floored at 0) and reports THREE views of the same dollars: (1) discrete_buckets — mutually exclusive buckets at the 7/15/30/60/90/120/180/360-day thresholds: 0-7, 8-15, 16-30, 31-60, 61-90, 91-120, 121-180, 181-360, 360+; these sum to total_ar to the cent and a reconciliation.reconciliation_ok flag proves it; (2) cumulative_buckets — rollups 7+, 15+, 30+, 60+, 90+, 120+, 180+, 360+, each DERIVED from the discrete buckets (so 360+ is a subset of 180+, and the two views can never drift); (3) buckets / legacy_buckets — the original fixed five-bucket shape (current, days_31_60, days_61_90, days_91_120, over_120) with full invoice detail, kept unchanged for backward compatibility. " + BOUNDARY_RULE_TEXT + " Every invoice also carries its own aging_bucket label. Includes client emails for direct action.",
+    "USE FOR: who owes the firm, how much, and how old, firm-wide or by attorney/client — the canonical AR tool. For EOS weekly measurables use get_ar_scorecard; for one matter use get_matter_financial_summary; for payments received use get_payments. Full accounts receivable aging report. Counts ONLY revenue_kind fee bills; trust/retainer funding requests (trust_kind) are advance-deposit requests, not receivables, and are excluded. Ages every open invoice by days_outstanding (days past due_at, floored at 0) and reports THREE views of the same dollars: (1) discrete_buckets — mutually exclusive buckets at the 7/15/30/60/90/120/180/360-day thresholds: 0-7, 8-15, 16-30, 31-60, 61-90, 91-120, 121-180, 181-360, 360+; these sum to total_ar to the cent and a reconciliation.reconciliation_ok flag proves it; (2) cumulative_buckets — rollups 7+, 15+, 30+, 60+, 90+, 120+, 180+, 360+, each DERIVED from the discrete buckets (so 360+ is a subset of 180+, and the two views can never drift); (3) buckets / legacy_buckets — the original fixed five-bucket shape (current, days_31_60, days_61_90, days_91_120, over_120) with full invoice detail, kept unchanged for backward compatibility. " + BOUNDARY_RULE_TEXT + " Every invoice also carries its own aging_bucket label. Includes client emails for direct action.",
     {
       responsible_attorney_id: z
         .number()
@@ -498,7 +501,7 @@ export function registerARTools(server: McpServer): void {
   // get_wip_report
   server.tool(
     "get_wip_report",
-    "Work-in-progress report: all unbilled time and expenses, how long they have been sitting. Identifies revenue at risk of aging off.",
+    "USE FOR: unbilled work firm-wide or by attorney and how long it has been sitting — identifies revenue at risk of aging off. Work-in-progress report: all unbilled time and expenses. For Clio's own per-matter/per-client WIP totals use get_billable_matters / get_billable_clients; for one matter (including draft-billed WIP) use get_matter_financial_summary.",
     {
       responsible_attorney_id: z
         .number()
@@ -570,7 +573,7 @@ export function registerARTools(server: McpServer): void {
   // get_trust_balances
   server.tool(
     "get_trust_balances",
-    "Trust/IOLTA account balances and recent activity per matter. Flags low balances (<$500) and dormant accounts (90+ days no activity).",
+    "USE FOR: how much client money is in trust/IOLTA, per matter or firm-wide. Balances come from the trust bank-account ledger (/bank_transactions), the same source as the Clio UI and get_matter_financial_summary; trust REQUESTS are not counted. Firm-wide runs include a reconciliation block proving the per-matter balances sum to Clio's account balances. Flags LOW_BALANCE (under $500 but above $0) and DORMANT (no activity in 90+ days). To ask a client to fund trust, use create_trust_request.",
     {
       matter_id: z
         .number()
@@ -579,118 +582,90 @@ export function registerARTools(server: McpServer): void {
       min_balance: z
         .number()
         .optional()
-        .describe("Only show matters with trust balance above this amount"),
+        .describe("Only show matters with trust balance at or above this amount"),
+      include_zero_balance: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include matters whose trust ledger nets to $0 (default false: only matters holding money)"),
+      history_limit: z
+        .number()
+        .optional()
+        .default(10)
+        .describe("Recent ledger rows to include per matter (default 10)"),
     },
     async (params) => {
       try {
-        // Get trust bank accounts
         const bankAccounts = await fetchAllPages<any>("/bank_accounts", {
           fields: "id,name,type,balance",
         });
+        const trustAccounts = bankAccounts.filter(isTrustAccount);
+        const trustIds = new Set<number>(trustAccounts.map((a: any) => a.id));
 
-        const trustAccounts = bankAccounts.filter(
-          (a: any) => a.type === "trust" || a.type === "Trust"
-        );
-
-        // Get trust ledger entries
-        const ledgerParams: Record<string, any> = {
-          fields: TRUST_FIELDS,
-        };
-        if (params.matter_id) ledgerParams.matter_id = params.matter_id;
-
-        const ledgerEntries = await fetchAllPages<any>(
-          "/trust_line_items",
-          ledgerParams
-        );
-
-        // Group by matter
-        const byMatter: Record<
-          number,
-          {
-            matter: any;
-            balance: number;
-            entries: any[];
-            last_deposit: string | null;
-            last_disbursement: string | null;
-          }
-        > = {};
-
-        for (const entry of ledgerEntries) {
-          const mid = entry.matter?.id;
-          if (!mid) continue;
-          const amount = entry.total || 0;
-
-          if (!byMatter[mid]) {
-            byMatter[mid] = {
-              matter: entry.matter,
-              balance: 0,
-              entries: [],
-              last_deposit: null,
-              last_disbursement: null,
-            };
-          }
-
-          byMatter[mid].balance += amount;
-
-          byMatter[mid].entries.push({
-            id: entry.id,
-            date: entry.date,
-            amount,
+        // One matter: its ledger rows across every account, filtered to trust.
+        // Firm-wide: every row on each trust account, so unassigned deposits are
+        // seen and the per-account reconciliation can close.
+        let txns: any[];
+        if (params.matter_id) {
+          const rows = await fetchAllPages<any>("/bank_transactions", {
+            matter_id: params.matter_id,
+            fields: TRUST_TX_FIELDS,
           });
-
-          if (amount > 0 && !byMatter[mid].last_deposit) {
-            byMatter[mid].last_deposit = entry.date;
-          }
-          if (amount < 0 && !byMatter[mid].last_disbursement) {
-            byMatter[mid].last_disbursement = entry.date;
-          }
+          txns = rows.filter((t: any) => t?.bank_account?.id != null && trustIds.has(t.bank_account.id));
+        } else {
+          const perAccount = await Promise.all(
+            trustAccounts.map((a: any) =>
+              fetchAllPages<any>("/bank_transactions", { bank_account_id: a.id, fields: TRUST_TX_FIELDS })
+            )
+          );
+          txns = perAccount.flat();
         }
 
+        const { matters, unassigned_total, unassigned_count } = summarizeTrustByMatter(txns);
         const today = new Date();
-        let lowBalanceCount = 0;
-        let dormantCount = 0;
+        const limit = Math.max(0, params.history_limit ?? 10);
 
-        let matterResults = Object.entries(byMatter).map(([, m]) => {
-          const lastActivity = m.entries.length > 0 ? m.entries[0].date : null;
-          const daysSinceActivity = lastActivity
-            ? Math.floor(
-                (today.getTime() - new Date(lastActivity).getTime()) /
-                  (1000 * 60 * 60 * 24)
-              )
+        let matterResults = matters.map((m) => {
+          const daysSinceActivity = m.last_activity_date
+            ? Math.floor((today.getTime() - new Date(m.last_activity_date).getTime()) / (1000 * 60 * 60 * 24))
             : null;
-
           const flags: string[] = [];
-          if (m.balance < 500) {
-            flags.push("LOW_BALANCE");
-            lowBalanceCount++;
-          }
-          if (daysSinceActivity !== null && daysSinceActivity > 90) {
-            flags.push("DORMANT");
-            dormantCount++;
-          }
-
+          if (m.balance > 0 && m.balance < 500) flags.push("LOW_BALANCE");
+          if (m.balance !== 0 && daysSinceActivity !== null && daysSinceActivity > 90) flags.push("DORMANT");
           return {
-            matter_id: m.matter.id,
-            matter_number: m.matter.display_number,
-            client: m.matter.client,
+            matter_id: m.matter_id,
+            matter_number: m.matter_number,
             current_balance: m.balance,
-            last_deposit_date: m.last_deposit,
-            last_disbursement_date: m.last_disbursement,
-            recent_entries: m.entries.slice(0, 10),
+            funds_in_total: m.funds_in,
+            funds_out_total: m.funds_out,
+            last_deposit_date: m.last_deposit_date,
+            last_disbursement_date: m.last_disbursement_date,
+            last_activity_date: m.last_activity_date,
+            days_since_last_activity: daysSinceActivity,
+            recent_transactions: m.transactions.slice(0, limit).map((t: any) => ({
+              id: t.id,
+              date: t.date,
+              amount: t.amount,
+              description: t.description ?? null,
+              source: t.source ?? null,
+              bill_id: t.bill?.id ?? null,
+            })),
             flags,
           };
         });
 
-        if (params.min_balance !== undefined) {
-          matterResults = matterResults.filter(
-            (m) => m.current_balance >= params.min_balance!
-          );
+        if (!params.include_zero_balance && !params.matter_id) {
+          matterResults = matterResults.filter((m) => m.current_balance !== 0);
         }
+        if (params.min_balance !== undefined) {
+          matterResults = matterResults.filter((m) => m.current_balance >= params.min_balance!);
+        }
+        matterResults.sort((a, b) => b.current_balance - a.current_balance);
 
-        const totalTrustHeld =
-          Math.round(
-            matterResults.reduce((s, m) => s + m.current_balance, 0) * 100
-          ) / 100;
+        // Counted AFTER filtering, so the summary describes the rows returned.
+        const lowBalanceCount = matterResults.filter((m) => m.flags.includes("LOW_BALANCE")).length;
+        const dormantCount = matterResults.filter((m) => m.flags.includes("DORMANT")).length;
+        const totalTrustHeld = round2(matterResults.reduce((s, m) => s + m.current_balance, 0));
 
         return {
           content: [
@@ -699,10 +674,19 @@ export function registerARTools(server: McpServer): void {
               text: JSON.stringify(
                 {
                   summary: {
+                    balance_source: "bank_transactions on trust accounts",
                     total_trust_held: totalTrustHeld,
                     active_trust_matters: matterResults.length,
                     low_balance_flags: lowBalanceCount,
                     dormant_flags: dormantCount,
+                    ...(params.matter_id
+                      ? {}
+                      : {
+                          unassigned_to_matter_total: unassigned_total,
+                          unassigned_to_matter_count: unassigned_count,
+                          // Built from every ledger row, before any matter filter.
+                          reconciliation: reconcileTrustAccounts(trustAccounts, txns),
+                        }),
                     trust_accounts: trustAccounts.map((a: any) => ({
                       id: a.id,
                       name: a.name,
