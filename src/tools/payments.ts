@@ -134,10 +134,15 @@ export function summarizePayments(rows: { amount?: number | null; date?: string 
  * `credits_issued`. A mismatch means rows are being double-counted (or missed)
  * and the totals should not be trusted. Only meaningful over a bill's full
  * history, so callers skip it when a date filter is applied.
+ *
+ * Trust requests (kind trust_kind) are skipped: they are funded by a deposit
+ * into trust, which is a bank transaction, not an allocation, so a paid trust
+ * request never has allocation rows (Cota 22106, Almadani 21329, Krauskopf
+ * 23678 all flagged falsely on the first live run, 2026-10-19).
  */
 export function checkAgainstBills(
   rows: { amount?: number | null; source: PaymentSource; bill?: { id?: number | null; number?: string | null } | null }[],
-  bills: { id: number; number?: string | null; paid?: number | null; credits_issued?: number | null }[],
+  bills: { id: number; number?: string | null; kind?: string | null; paid?: number | null; credits_issued?: number | null }[],
 ): { ok: boolean; bills_checked: number; mismatches: { bill_id: number; bill_number: string | null; allocations_paid: number; bill_paid: number; allocations_credits: number; bill_credits_issued: number }[] } {
   const sums = new Map<number, { paid: number; credits: number }>();
   for (const r of rows) {
@@ -151,6 +156,7 @@ export function checkAgainstBills(
   const mismatches = [];
   let checked = 0;
   for (const b of bills) {
+    if (b.kind === "trust_kind") continue;
     const s = sums.get(b.id) ?? { paid: 0, credits: 0 };
     // Without classification every row lands in paid, so compare the combined figure.
     const combined = rows.every((r) => r.source === "unknown");
@@ -175,7 +181,7 @@ export function checkAgainstBills(
 }
 
 async function fetchBillsForCheck(q: AllocationQuery): Promise<any[] | null> {
-  const fields = "id,number,state,paid,credits_issued";
+  const fields = "id,number,state,kind,paid,credits_issued";
   if (q.bill_id) {
     const res = await rawGetSingle(`/bills/${q.bill_id}`, { fields });
     return res?.data ? [res.data] : [];
