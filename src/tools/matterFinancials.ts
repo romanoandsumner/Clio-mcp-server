@@ -2,6 +2,8 @@ import { z } from "zod/v4";
 import { round2 } from "../utils/num";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { fetchAllPages, rawGetSingle } from "../clio/pagination";
+import { isTrustAccount } from "../domain/trust";
+import { fetchAllocations, classifyAllocation, summarizePayments } from "./payments";
 
 const MATTER_FIELDS =
   "id,display_number,description,status,open_date,billing_method,responsible_attorney{id,name},client{id,name},practice_area{name}";
@@ -31,7 +33,7 @@ function daysBetween(a: Date, b: Date): number {
 export function registerMatterFinancialsTools(server: McpServer): void {
   server.tool(
     "get_matter_financial_summary",
-    "Per-matter financial snapshot: trust balance from bank_transactions on the IOLTA account (matches Clio UI), WIP split into truly-unbilled vs draft-billed, and outstanding invoices (AR — revenue_kind fee bills only; trust/retainer funding requests are excluded from AR).",
+    "USE FOR: everything about ONE matter's money in one call. Trust balance (from the trust bank-account ledger, matches the Clio UI); WIP split into truly-unbilled vs draft-billed; open AR (revenue_kind fee invoices only; trust funding requests excluded); and `collected`: billed to date, paid to date (credits and voided allocations excluded), paid from trust, credits to date, and last payment date. For the individual payments behind `collected` use get_payments; for firm-wide views use get_ar_aging, get_trust_balances or get_wip_report.",
     {
       matter_id: z.coerce.number().describe("Clio matter ID"),
       trust_history_limit: z
@@ -102,6 +104,16 @@ export function registerMatterFinancialsTools(server: McpServer): void {
           fields: BILL_FIELDS,
         });
 
+        // For the `collected` block: paid bills (billed-to-date) and every
+        // payment/credit allocation on the matter. Failures degrade to a note
+        // rather than sinking the whole snapshot.
+        const paidBillsPromise = fetchAllPages<any>("/bills", {
+          matter_id: matterId,
+          state: "paid",
+          fields: BILL_FIELDS,
+        }).catch(() => null);
+        const allocationsPromise = fetchAllocations({ matter_id: matterId }).catch((e: any) => ({ error: e?.message ?? String(e) }));
+
         const [
           bankAccounts,
           bankTransactions,
@@ -110,6 +122,8 @@ export function registerMatterFinancialsTools(server: McpServer): void {
           expenseEntries,
           draftBills,
           outstandingBills,
+          paidBills,
+          allocationsResult,
         ] = await Promise.all([
           bankAccountsPromise,
           bankTransactionsPromise,
@@ -118,6 +132,8 @@ export function registerMatterFinancialsTools(server: McpServer): void {
           expensePromise,
           draftBillsPromise,
           outstandingBillsPromise,
+          paidBillsPromise,
+          allocationsPromise,
         ]);
 
         const today = new Date();
@@ -125,11 +141,7 @@ export function registerMatterFinancialsTools(server: McpServer): void {
         // --- Trust ---
         const trustBankAccountIds = new Set<number>(
           bankAccounts
-            .filter((a: any) => {
-              const t = (a?.type || "").toLowerCase();
-              const n = (a?.name || "").toLowerCase();
-              return t === "trust" || n.includes("iolta") || n.includes("trust");
-            })
+            .filter(isTrustAccount)
             .map((a: any) => a.id)
             .filter((id: any): id is number => typeof id === "number")
         );
@@ -314,6 +326,32 @@ export function registerMatterFinancialsTools(server: McpServer): void {
 
         const totalExposure = round2(combinedWip + arBalance);
 
+        // --- Collected ---
+        // Billed to date = issued fee invoices (open + paid). Paid to date excludes
+        // credits and voided allocations; see tools/payments.ts for why both matter.
+        const issuedFeeBills = [...outstandingBills, ...(paidBills ?? [])].filter((b: any) => b.kind === "revenue_kind");
+        let collected: any;
+        if ("error" in allocationsResult) {
+          collected = { error: `Could not read payments: ${allocationsResult.error}` };
+        } else {
+          const rows = allocationsResult.classified
+            ? allocationsResult.rows.filter((a: any) => !a.voided_at)
+            : allocationsResult.rows;
+          const pay = summarizePayments(rows.map((a: any) => ({ amount: a.amount, date: a.date, source: classifyAllocation(a) })));
+          collected = {
+            billed_to_date: paidBills ? round2(issuedFeeBills.reduce((s: number, b: any) => s + (b.total || 0), 0)) : null,
+            paid_to_date: pay.total_paid,
+            paid_from_trust: pay.by_source.trust,
+            credits_to_date: pay.total_credits,
+            last_payment_date: pay.last_payment_date,
+            payment_count: pay.payment_count,
+            classification_available: allocationsResult.classified,
+            ...(allocationsResult.classified
+              ? {}
+              : { warning: "Clio did not return void/credit detail; paid_to_date may include voided allocations and credits." }),
+          };
+        }
+
         const result: any = {
           matter: {
             id: matter?.id,
@@ -373,6 +411,7 @@ export function registerMatterFinancialsTools(server: McpServer): void {
             flags: arFlags,
             outstanding_bills: outstanding,
           },
+          collected,
           totals: {
             trust_balance: round2(trustBalance),
             wip_value: round2(combinedWip),

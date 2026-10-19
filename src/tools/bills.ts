@@ -27,6 +27,45 @@ export const BILL_LINE_ITEM_FIELDS =
 
 export type BillTargetState = "draft" | "awaiting_approval" | "awaiting_payment" | "paid" | "void";
 
+// Clio's state for an issued, unpaid bill. (There is no "outstanding" state;
+// get_bills once tested for one, so its aging flag never fired.)
+export const OPEN_BILL_STATE = "awaiting_payment";
+
+/** Days past due and the 30/60/90 flag — only for a bill the client still owes. */
+export function billAging(
+  b: { state?: string | null; due_at?: string | null },
+  today: Date,
+): { days_outstanding: number | null; aging_flag: string | null } {
+  if (b.state !== OPEN_BILL_STATE || !b.due_at) return { days_outstanding: null, aging_flag: null };
+  const days = Math.floor((today.getTime() - new Date(b.due_at).getTime()) / (1000 * 60 * 60 * 24));
+  let aging_flag: string | null = null;
+  if (days > 90) aging_flag = "90+ days";
+  else if (days > 60) aging_flag = "60+ days";
+  else if (days > 30) aging_flag = "30+ days";
+  return { days_outstanding: days, aging_flag };
+}
+
+/**
+ * What the client owes across these bills, split the way get_ar_aging splits it:
+ * open fee invoices (revenue_kind) are receivables; open trust requests
+ * (trust_kind) are asks to fund trust, not money owed for services. Deleted,
+ * void, draft and paid bills owe nothing whatever their `balance` field says
+ * (Clio leaves a deleted bill's balance at its full total).
+ */
+export function openBalances(bills: { state?: string | null; kind?: string | null; balance?: number | null }[]): {
+  receivable: number;
+  trust_requests: number;
+} {
+  let receivable = 0;
+  let trust = 0;
+  for (const b of bills) {
+    if (b.state !== OPEN_BILL_STATE) continue;
+    if (b.kind === "trust_kind") trust += b.balance || 0;
+    else receivable += b.balance || 0;
+  }
+  return { receivable: Math.round(receivable * 100) / 100, trust_requests: Math.round(trust * 100) / 100 };
+}
+
 export interface SetBillStateOutcome {
   payload: Record<string, unknown>;
   isError: boolean;
@@ -144,7 +183,7 @@ export async function setBillState(
 export function registerBillTools(server: McpServer): void {
   server.tool(
     "get_bills",
-    "Get bills with filters. Flags aging: outstanding > 30, 60, 90 days. Returns payment detail (`paid`, `pending`, `paid_at`, `due`, `credits_issued`), routing info (`client`, `shared`), bill metadata (`subject`, `memo`, `kind`, `type`, `start_at`, `end_at`, `created_at`, `updated_at`), state machine (`available_state_transitions`, `can_update`), and sent indicators (`sent`, `last_sent_at`) so callers can distinguish bills that have been emailed/shared to the client from approved bills still sitting in the drawer.",
+    "USE FOR: the bills on a matter or client and each bill's state, totals and payment status. Per bill: `paid` (money received, credits NOT included), `credits_issued` (credits applied), `paid_at`, `due`, `balance`, plus metadata, state transitions and sent indicators (`sent`, `last_sent_at`; add verify_submissions for bills delivered outside Clio). `total_balance` is what the client owes on open fee invoices only (awaiting_payment, revenue_kind); open trust requests are reported separately. Deleted bill versions (prior drafts Clio keeps under the same number) are excluded unless include_deleted=true. `days_outstanding`/`aging_flag` are set only on open bills. NOT FOR: firm-wide AR aging (use get_ar_aging), individual payments and their dates (use get_payments), or the lines on one bill (use get_bill_line_items).",
     {
       matter_id: z.coerce.number().optional().describe("Filter by matter ID"),
       client_id: z.coerce.number().optional().describe("Filter by client ID"),
@@ -153,6 +192,11 @@ export function registerBillTools(server: McpServer): void {
         .optional()
         .default("all")
         .describe("Filter by bill state"),
+      include_deleted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include deleted bill versions (default false). Clio keeps each deleted draft under the bill's number with its full balance, so they look like duplicate unpaid bills."),
       issued_after: z.string().optional().describe("Issued after date (YYYY-MM-DD)"),
       issued_before: z.string().optional().describe("Issued before date (YYYY-MM-DD)"),
       verify_submissions: z.boolean().optional().default(false).describe(
@@ -174,7 +218,9 @@ export function registerBillTools(server: McpServer): void {
         if (params.issued_after) queryParams.issued_after = params.issued_after;
         if (params.issued_before) queryParams.issued_before = params.issued_before;
 
-        const bills = await fetchAllPages<any>("/bills", queryParams);
+        const fetched = await fetchAllPages<any>("/bills", queryParams);
+        const bills = params.include_deleted ? fetched : fetched.filter((b: any) => b.state !== "deleted");
+        const excludedDeleted = fetched.length - bills.length;
         const today = new Date();
 
         // Bills delivered outside Clio (no send route exists in v4) are only
@@ -186,17 +232,7 @@ export function registerBillTools(server: McpServer): void {
           : null;
 
         const formatted = bills.map((b: any) => {
-          const dueDate = b.due_at ? new Date(b.due_at) : null;
-          const daysOutstanding = dueDate
-            ? Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24))
-            : null;
-
-          let aging_flag: string | null = null;
-          if (b.state === "outstanding" && daysOutstanding !== null) {
-            if (daysOutstanding > 90) aging_flag = "90+ days";
-            else if (daysOutstanding > 60) aging_flag = "60+ days";
-            else if (daysOutstanding > 30) aging_flag = "30+ days";
-          }
+          const { days_outstanding: daysOutstanding, aging_flag } = billAging(b, today);
 
           const last_sent_at = b.last_sent_at ?? null;
           const sent = !!last_sent_at;
@@ -247,10 +283,7 @@ export function registerBillTools(server: McpServer): void {
           };
         });
 
-        const totalBalance =
-          Math.round(
-            formatted.reduce((s: number, b: any) => s + (b.balance || 0), 0) * 100
-          ) / 100;
+        const open = openBalances(formatted);
 
         // When verifying, lead with the number that matters: bills with no
         // sent flag AND no submission entry — the ones nobody can show went out.
@@ -265,12 +298,13 @@ export function registerBillTools(server: McpServer): void {
               text: JSON.stringify(
                 {
                   count: formatted.length,
-                  total_balance: totalBalance,
+                  total_balance: open.receivable,
+                  open_trust_request_balance: open.trust_requests,
+                  excluded_deleted_count: excludedDeleted,
                   ...(unverified
                     ? {
                         unverified_count: unverified.length,
-                        unverified_balance:
-                          Math.round(unverified.reduce((s: number, b: any) => s + (b.balance || 0), 0) * 100) / 100,
+                        unverified_balance: openBalances(unverified).receivable,
                       }
                     : {}),
                   bills: formatted,
