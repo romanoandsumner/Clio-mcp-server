@@ -109,7 +109,7 @@ export function registerBillsGapTools(server: McpServer): void {
   // get_billable_matters — Clio's native WIP-by-matter list.
   server.tool(
     "get_billable_matters",
-    "List billable matters (GET /billable_matters) — Clio's first-party WIP view: matters with unbilled work, each with unbilled hours/amount and amount in trust. An authoritative alternative to computing WIP from raw activities. Filter by client, attorney, matter, status, and date range.",
+    "List billable matters (GET /billable_matters) — Clio's first-party WIP view: matters with unbilled work, each with unbilled hours/amount and amount in trust. An authoritative alternative to computing WIP from raw activities. Filter by client, attorney, matter, status, and date range. Note `amount in trust` here is Clio's figure; for the trust ledger itself use get_trust_balances.",
     {
       client_id: z.coerce.number().optional().describe("Only matters for this client"),
       matter_id: z.coerce.number().optional().describe("Only this matter"),

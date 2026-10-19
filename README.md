@@ -284,7 +284,7 @@ curl -X POST https://your-railway-url.up.railway.app/version \
 |------|-------------|
 | `get_matters` | List matters with status/attorney/client filters |
 | `get_matter` | Get single matter by ID or search query |
-| `get_matter_financial_summary` | Per-matter snapshot: trust balance, WIP, outstanding AR |
+| `get_matter_financial_summary` | Per-matter snapshot: trust balance, WIP, outstanding AR, and collected (billed / paid / credits to date) |
 | `get_stale_matters` | Find open matters with no recent activity |
 | `get_billing_gaps` | Matters with WIP but no recent bill issued |
 | `get_time_entries` | Time entries with date/user/matter/billed filters |
@@ -297,11 +297,11 @@ curl -X POST https://your-railway-url.up.railway.app/version \
 | `get_contacts` | Search contacts by name or email |
 | `create_contact` | Create a client/contact (Person or Company); returns the id to use as `create_matter`'s `client_id` |
 | `get_tasks` | Tasks with status/assignee/due date filters |
-| `get_bills` | Bills with state/date filters and aging flags |
-| `get_payments` | Individual payments/credits applied to bills (Clio allocations), incl. reversals |
+| `get_bills` | Bills with state/date filters; open-invoice balance and aging (deleted versions excluded by default) |
+| `get_payments` | What a client paid: each payment/credit applied to a bill, tagged by source (direct, trust, online, credit); voids excluded; self-checks against the bills |
 | `get_ar_aging` | Full AR aging report. Discrete buckets at 7/15/30/60/90/120/180/360 days (0-7, 8-15, 16-30, 31-60, 61-90, 91-120, 121-180, 181-360, 360+, inclusive both ends, summing to `total_ar`), cumulative `N+` rollups derived from them (`N+` = days_outstanding > N), plus the original five-bucket shape under `buckets`/`legacy_buckets` |
 | `get_wip_report` | Work-in-progress report with aging flags |
-| `get_trust_balances` | Trust/IOLTA balances with low-balance and dormancy flags |
+| `get_trust_balances` | Trust/IOLTA balances from the bank-account ledger, reconciled to Clio's account balances, with low-balance and dormancy flags |
 | `get_user_productivity` | Timekeeper hours and top matters |
 | `get_billable_target_report` | Hours vs daily billable target per timekeeper with weekly trends (not the dashboard's utilization rate) |
 | `get_realization_rate` | Billed vs worked value by timekeeper and matter |

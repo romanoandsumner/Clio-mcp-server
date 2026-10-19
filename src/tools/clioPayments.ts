@@ -190,7 +190,7 @@ export function registerClioPaymentsTools(server: McpServer): void {
   // get_clio_payments — online payments collected through Clio Payments.
   server.tool(
     "get_clio_payments",
-    "List online payments collected through Clio Payments (GET /clio_payments/payments). Filter by bill, contact, or state. Use this to reconcile which payment links have actually been paid, alongside get_payments and the AR aging.",
+    "List online payments collected through Clio Payments (GET /clio_payments/payments). Filter by bill, contact, or state. Use this to reconcile which payment links have actually been paid. Covers online payments ONLY; for everything a client paid (checks, wires, trust transfers, online) use get_payments.",
     {
       bill_id: z.coerce.number().optional().describe("Only payments allocated to this bill"),
       contact_id: z.coerce.number().optional().describe("Only payments from this contact"),

@@ -229,7 +229,7 @@ export function registerTimeTools(server: McpServer): void {
   // get_unbilled_time
   server.tool(
     "get_unbilled_time",
-    "Get all unbilled time entries grouped by matter with subtotals and firm-wide totals. Requires user_id or matter_id to keep response sizes manageable.",
+    "Get all unbilled time entries grouped by matter with subtotals and firm-wide totals. Requires user_id or matter_id to keep response sizes manageable. Use for entry-level detail; for WIP totals and aging use get_wip_report.",
     {
       matter_id: z.coerce.number().optional().describe("Filter by matter ID"),
       user_id: z.coerce.number().optional().describe("Filter by user/timekeeper ID"),

@@ -42,7 +42,7 @@ export function registerBillingExtrasTools(server: McpServer): void {
   // get_credit_memos — credits held against contacts.
   server.tool(
     "get_credit_memos",
-    "List credit memos (GET /credit_memos) — credits held against a contact that can be applied to their bills. Filter by contact. Each shows the amount, date, whether it's a discount, and any void date.",
+    "USE FOR: what the firm forgave or credited a client. Lists credit memos (GET /credit_memos) — credits held against a contact that can be applied to their bills. Filter by contact. Each shows the amount, date, whether it's a discount, and any void date. A credit applied to a bill is NOT a payment: get_payments tags those rows source=credit and keeps them out of total_paid. For write-offs by timekeeper use get_monthly_revenue.",
     {
       contact_id: z.coerce.number().optional().describe("Only credit memos for this contact"),
       limit: z.coerce.number().optional().default(200).describe("Max credit memos to return (default 200)"),
