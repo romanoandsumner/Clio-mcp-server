@@ -82,6 +82,18 @@ describe("checkAgainstBills", () => {
     expect(r.ok).toBe(true);
   });
 
+  it("skips paid trust requests, which are funded by trust deposits, not allocations", () => {
+    const r = checkAgainstBills(
+      [{ amount: 2843, source: "trust", bill: { id: 1312012175 } }],
+      [
+        { id: 1312012175, number: "22088", kind: "revenue_kind", paid: 2843, credits_issued: 0 },
+        { id: 1317530750, number: "22106", kind: "trust_kind", paid: 2843, credits_issued: 0 },
+      ],
+    );
+    expect(r.ok).toBe(true);
+    expect(r.bills_checked).toBe(1);
+  });
+
   it("ignores bills with no money on either side (deleted versions)", () => {
     const r = checkAgainstBills([], [{ id: 819733339, number: "15323", paid: 0, credits_issued: 0 }]);
     expect(r.bills_checked).toBe(0);
