@@ -23,6 +23,63 @@ async function listFeeAllocationReports(): Promise<any[]> {
 
 
 /**
+ * Rows for a Fee Allocation tool, and an honest account of what they cover.
+ *
+ * These tools used to require start_date/end_date, read the LATEST scheduled
+ * report regardless, and echo the requested dates back as the `period` — so the
+ * output looked scoped to a period it wasn't. Now:
+ *  - dates given, no report_id → a report is GENERATED for exactly that window
+ *    (payment-date basis by default, same engine as get_monthly_fee_allocation);
+ *  - report_id given → that report is used as-is and its own period is read back
+ *    from Clio and reported; any dates passed are flagged as ignored.
+ */
+export async function loadFeeAllocationRows(p: {
+  start_date?: string;
+  end_date?: string;
+  report_id?: number;
+  basis?: "payment" | "issue";
+}): Promise<{ rows: Record<string, string>[]; source: Record<string, unknown> }> {
+  const basis = p.basis ?? "payment";
+  if (p.report_id) {
+    const { rows, report } = await getFeeAllocationCSV(p.report_id);
+    let period: { start: string | null; end: string | null } = { start: null, end: null };
+    try {
+      const meta = await rawGetSingle(`/reports/${p.report_id}`, { fields: "id,start_date,end_date" });
+      const m = meta?.data ?? meta;
+      period = { start: m?.start_date ? String(m.start_date).slice(0, 10) : null, end: m?.end_date ? String(m.end_date).slice(0, 10) : null };
+    } catch { /* period unknown; reported as null */ }
+    return {
+      rows,
+      source: {
+        kind: "existing_report",
+        report: { id: report.id, name: report.name },
+        period,
+        ...(p.start_date || p.end_date
+          ? { warning: "start_date/end_date were ignored because report_id was given; `period` is the report's own range." }
+          : {}),
+      },
+    };
+  }
+  if (!p.start_date || !p.end_date) {
+    throw new Error("Pass start_date and end_date (a report is generated for that window), or a report_id from list_fee_allocation_reports.");
+  }
+  const [y, mo] = p.start_date.split("-").map(Number);
+  const rows = await genFeeAllocationByMonth(y, mo, {
+    filterByPayment: basis !== "issue",
+    startOverride: p.start_date,
+    endOverride: p.end_date,
+  });
+  return {
+    rows,
+    source: {
+      kind: "generated_report",
+      basis,
+      period: { start: p.start_date, end: p.end_date },
+    },
+  };
+}
+
+/**
  * Count working days (Mon-Fri) between two dates inclusive.
  */
 function getWorkingDays(start: string, end: string): number {
@@ -344,7 +401,7 @@ export function registerPerformanceTools(server: McpServer): void {
   // get_realization_rate
   server.tool(
     "get_realization_rate",
-    "Realization rate: billed value / worked value, by timekeeper and/or matter. Shows where time is being written off.",
+    "Realization rate: billed value / worked value, by timekeeper and/or matter. Shows where time is being written off. For billed vs collected per attorney use get_timekeeper_realization.",
     {
       start_date: z.string().describe("Start date (YYYY-MM-DD)"),
       end_date: z.string().describe("End date (YYYY-MM-DD)"),
@@ -678,7 +735,7 @@ export function registerPerformanceTools(server: McpServer): void {
   // list_fee_allocation_reports
   server.tool(
     "list_fee_allocation_reports",
-    "List all completed Fee Allocation Reports in Clio with their IDs and names. Use report IDs with get_fee_allocation, get_responsible_collections, or get_attributable_collections to access a specific report instead of the latest.",
+    "List all completed Fee Allocation Reports in Clio with their IDs and names. Pass a report ID to get_fee_allocation or get_responsible_collections to read that report as-is instead of generating one for a date range; get_attributable_collections reads the latest report unless given one.",
     {},
     async () => {
       try {
@@ -706,21 +763,18 @@ export function registerPerformanceTools(server: McpServer): void {
   // get_fee_allocation
   server.tool(
     "get_fee_allocation",
-    "Fee allocation by timekeeper using Clio's own Fee Allocation Report (exact numbers, same as Rachel's reports). Downloads the latest auto-generated report CSV and aggregates by timekeeper. Filter by date range and optionally by user. Optionally specify report_id from list_fee_allocation_reports to use a specific report instead of the latest.",
+    "USE FOR: who gets credit for money collected (or billed) in a date range, per timekeeper, from Clio's own Fee Allocation Report. Generates a report for exactly start_date..end_date: basis='payment' (default) = money received in the window; basis='issue' = time on invoices issued in the window. Pass report_id instead to read an existing report as-is (its own period is reported). Optional user_name filter. For one month use get_monthly_fee_allocation; for per-invoice rows use get_fee_allocation_detail; for roll-up by responsible attorney use get_responsible_collections; for what one client paid use get_payments.",
     {
-      start_date: z.string().describe("Start date for collections period (YYYY-MM-DD)"),
-      end_date: z.string().describe("End date for collections period (YYYY-MM-DD)"),
-      user_id: z.coerce.number().optional().describe("Filter to a specific timekeeper by name match"),
+      start_date: z.string().optional().describe("Start of the window (YYYY-MM-DD). Required unless report_id is given."),
+      end_date: z.string().optional().describe("End of the window (YYYY-MM-DD). Required unless report_id is given."),
+      basis: z.enum(["payment", "issue"]).optional().default("payment").describe("payment = money received in the window (default); issue = time on invoices issued in the window"),
       user_name: z.string().optional().describe("Filter by timekeeper name (partial match)"),
-      report_id: z.coerce.number().optional().describe("Specific Clio report ID to use (from list_fee_allocation_reports). If omitted, uses the latest report."),
+      report_id: z.coerce.number().optional().describe("Read this existing report (from list_fee_allocation_reports) instead of generating one; dates are then ignored."),
     },
     async (params) => {
       try {
-        const { rows, report } = await getFeeAllocationCSV(params.report_id);
+        const { rows, source } = await loadFeeAllocationRows(params);
 
-        // The report is already pre-filtered by Clio to the configured date range
-        // (bill payment date). Use ALL rows — no additional date filtering needed.
-        // Only filter by user if requested.
         const filtered = params.user_name
           ? rows.filter((r) => (r["User"] ?? "").toLowerCase().includes(params.user_name!.toLowerCase()))
           : rows;
@@ -781,9 +835,8 @@ export function registerPerformanceTools(server: McpServer): void {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              source: "Clio Fee Allocation Report (auto-generated)",
-              report: { id: report.id, name: report.name },
-              period: { start: params.start_date, end: params.end_date },
+              source: "Clio Fee Allocation Report",
+              ...source,
               total_collected: firmTotal,
               rows_in_report: rows.length,
               rows_in_period: filtered.length,
@@ -817,7 +870,7 @@ export function registerPerformanceTools(server: McpServer): void {
   // the dashboard uses for its collections/billed columns.
   server.tool(
     "get_monthly_fee_allocation",
-    "Per-month Fee Allocation by timekeeper from a FRESHLY GENERATED report scoped to ONE month (use this instead of get_fee_allocation when you need accurate month-specific numbers — get_fee_allocation reads the latest cumulative scheduled report and does NOT honor the date range). basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Returns per-timekeeper collected, billed $, and billed hours.",
+    "Per-month Fee Allocation by timekeeper from a FRESHLY GENERATED report scoped to ONE calendar month (for an arbitrary date range use get_fee_allocation, which now generates a report for exactly that window). basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Returns per-timekeeper collected, billed $, and billed hours.",
     {
       year: z.coerce.number().describe("Year, e.g. 2026"),
       month: z.coerce.number().describe("Month, 1-12"),
@@ -1007,11 +1060,11 @@ export function registerPerformanceTools(server: McpServer): void {
   // get_responsible_collections
   server.tool(
     "get_responsible_collections",
-    "Collections rolled up to responsible attorneys using Clio's Fee Allocation Report. Groups each timekeeper's collected amounts under the responsible attorney on their matter. Exact numbers from Clio's own report. Optionally specify report_id from list_fee_allocation_reports to use a specific report instead of the latest.",
+    "USE FOR: money collected in a date range rolled up to the responsible attorney on each matter, with the timekeepers under each. Generates a Fee Allocation Report for exactly start_date..end_date on a payment-date basis (money received in the window); pass report_id instead to read an existing report as-is. The monthly breakdown buckets by invoice ISSUE date, as the report rows carry no payment date. For per-timekeeper credit use get_fee_allocation.",
     {
-      start_date: z.string().describe("Start date (YYYY-MM-DD)"),
-      end_date: z.string().describe("End date (YYYY-MM-DD)"),
-      report_id: z.coerce.number().optional().describe("Specific Clio report ID to use (from list_fee_allocation_reports). If omitted, uses the latest report."),
+      start_date: z.string().optional().describe("Start of the window (YYYY-MM-DD). Required unless report_id is given."),
+      end_date: z.string().optional().describe("End of the window (YYYY-MM-DD). Required unless report_id is given."),
+      report_id: z.coerce.number().optional().describe("Read this existing report (from list_fee_allocation_reports) instead of generating one; dates are then ignored."),
       breakdown: z
         .enum(["none", "monthly"])
         .optional()
@@ -1020,10 +1073,7 @@ export function registerPerformanceTools(server: McpServer): void {
     },
     async (params) => {
       try {
-        const { rows, report } = await getFeeAllocationCSV(params.report_id);
-
-        // The report is already pre-filtered by Clio to the configured date range.
-        // Use ALL rows — no additional date filtering needed.
+        const { rows, source } = await loadFeeAllocationRows(params);
         const filtered = rows;
 
         // Helper to get period key
@@ -1079,9 +1129,8 @@ export function registerPerformanceTools(server: McpServer): void {
           content: [{
             type: "text" as const,
             text: JSON.stringify({
-              source: "Clio Fee Allocation Report (auto-generated)",
-              report: { id: report.id, name: report.name },
-              period: { start: params.start_date, end: params.end_date },
+              source: "Clio Fee Allocation Report",
+              ...source,
               firm_total_collections: firmTotal,
               rows_in_period: filtered.length,
               responsible_attorneys: results,

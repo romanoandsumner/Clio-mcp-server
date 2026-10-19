@@ -146,7 +146,7 @@ export function registerExpenseTools(server: McpServer): void {
   // get_unbilled_expenses
   server.tool(
     "get_unbilled_expenses",
-    "Get all unbilled expenses grouped by matter with totals",
+    "Get all unbilled expenses grouped by matter with totals. Use for entry-level detail; for WIP totals and aging use get_wip_report.",
     {
       matter_id: z.coerce.number().optional().describe("Filter by matter ID"),
       user_id: z.coerce.number().optional().describe("Filter by user ID"),

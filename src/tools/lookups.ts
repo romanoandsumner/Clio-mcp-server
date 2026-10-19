@@ -182,7 +182,7 @@ export function registerLookupTools(server: McpServer): void {
   // get_outstanding_client_balances — Clio's first-party AR-by-client report.
   server.tool(
     "get_outstanding_client_balances",
-    "Get outstanding client balances (GET /outstanding_client_balances) — Clio's first-party report of how much each client owes across their bills, with pending payments, last payment date, and newest bill due date. Filter by contact, responsible/originating attorney, and bill-due/last-paid date ranges. Useful as a cross-check on the hand-rolled AR aging.",
+    "Get outstanding client balances (GET /outstanding_client_balances) — Clio's first-party report of how much each client owes across their bills, with pending payments, last payment date, and newest bill due date. Filter by contact, responsible/originating attorney, and bill-due/last-paid date ranges. Use as a cross-check on get_ar_aging (the canonical AR tool), not as the primary AR figure.",
     {
       contact_id: z.coerce.number().optional().describe("Only this client's balance"),
       responsible_attorney_id: z.coerce.number().optional().describe("Only matters with this responsible attorney"),
