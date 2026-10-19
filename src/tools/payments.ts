@@ -19,6 +19,11 @@
 // requested. `type` and `payment` are NOT valid allocation fields (Clio: "type,
 // payment are not valid fields"), so the parent-payment grouping isn't available
 // here — `is_reversal` is derived from the amount sign instead.
+//
+// Deleted bill versions: when a bill is regenerated, Clio keeps the prior versions
+// as `deleted` bills under the same number, and the payment's allocation surfaces
+// once per version. Counting all of them inflates totals (e.g. one payment showing
+// as four identical rows), so allocations on deleted bills are dropped by default.
 // ============================================================
 import { z } from "zod/v4";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -28,10 +33,18 @@ const ALLOCATION_FIELDS =
   "id,date,amount,bill{id,number,state}," +
   "matter{id,display_number},contact{id,name}";
 
+/** Drop allocations against deleted bill versions (see header). */
+export function excludeDeletedBillAllocations<T extends { bill?: { state?: string | null } | null }>(
+  allocations: T[]
+): { kept: T[]; excluded: number } {
+  const kept = allocations.filter((a) => a.bill?.state !== "deleted");
+  return { kept, excluded: allocations.length - kept.length };
+}
+
 export function registerPaymentTools(server: McpServer): void {
   server.tool(
     "get_payments",
-    "Query INDIVIDUAL payments/credits applied to bills (Clio allocations) — the per-payment detail get_bills doesn't expose. Each row is one payment applied to one bill, with `amount`, `date`, and the `bill`/`matter`/`contact`. Filter by matter, contact, bill, or date range. Voided/reversed payments surface as reversing rows (negative `amount`, flagged `is_reversal`); set include_reversals=false to drop them.",
+    "Query INDIVIDUAL payments/credits applied to bills (Clio allocations) — the per-payment detail get_bills doesn't expose. Each row is one payment applied to one bill, with `amount`, `date`, and the `bill`/`matter`/`contact`. Filter by matter, contact, bill, or date range. Voided/reversed payments surface as reversing rows (negative `amount`, flagged `is_reversal`); set include_reversals=false to drop them. Allocations against deleted bill versions (prior drafts of a regenerated bill) are excluded by default; set include_deleted_bills=true to see them. Note: rows do not distinguish cash payments from credits applied to a bill — check get_bills `credits_issued` before treating a row as cash received.",
     {
       matter_id: z.coerce.number().optional().describe("Filter by matter ID"),
       contact_id: z.coerce.number().optional().describe("Filter by contact/client ID"),
@@ -43,6 +56,11 @@ export function registerPaymentTools(server: McpServer): void {
         .optional()
         .default(true)
         .describe("Include reversing/voided rows (non-positive amounts). Default true."),
+      include_deleted_bills: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include allocations against deleted bill versions. Default false — they duplicate the live bill's payment."),
     },
     async (params) => {
       try {
@@ -55,6 +73,13 @@ export function registerPaymentTools(server: McpServer): void {
         if (params.bill_id) queryParams.bill_id = params.bill_id;
 
         let allocations = await fetchAllPages<any>("/allocations", queryParams);
+
+        let excludedDeletedBills = 0;
+        if (!params.include_deleted_bills) {
+          const { kept, excluded } = excludeDeletedBillAllocations(allocations);
+          allocations = kept;
+          excludedDeletedBills = excluded;
+        }
 
         // Date range filtered client-side on the allocation `date` (mirrors get_expenses):
         // avoids depending on a server-side date param whose name varies by resource.
@@ -81,7 +106,12 @@ export function registerPaymentTools(server: McpServer): void {
             {
               type: "text" as const,
               text: JSON.stringify(
-                { count: formatted.length, total_amount: total, payments: formatted },
+                {
+                  count: formatted.length,
+                  total_amount: total,
+                  excluded_deleted_bill_rows: excludedDeletedBills,
+                  payments: formatted,
+                },
                 null,
                 2
               ),
