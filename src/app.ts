@@ -8,7 +8,6 @@ import { buildUserContext, NotProvisionedError } from "./auth/vault";
 import { registerOAuthProxyRoutes } from "./auth/oauthProxy";
 import { resolveStaticApiKey } from "./auth/apiKeys";
 import { applyToolProfile, ToolProfile } from "./tools/profiles";
-import { getBoxAuthorizationUrl, exchangeBoxCodeForTokens } from "./box/auth";
 import {
   getGrowAuthorizationUrl,
   exchangeGrowCodeForTokens,
@@ -380,29 +379,6 @@ export function createApp(): express.Express {
     } catch (err: any) {
       console.error("[grow-oauth] callback failed:", err?.response?.data ?? err.message);
       res.status(500).send(`Grow OAuth error: ${err.message}`);
-    }
-  });
-
-  // --- Box OAuth (unchanged — out of scope) ---
-  app.get("/box/oauth/start", (_req, res) => {
-    const url = getBoxAuthorizationUrl();
-    res.redirect(url);
-  });
-
-  app.get("/box/oauth/callback", async (req, res) => {
-    const code = req.query.code as string;
-    if (!code) {
-      res.status(400).send("Missing authorization code");
-      return;
-    }
-
-    try {
-      const { email } = await exchangeBoxCodeForTokens(code);
-      res.send(
-        `<h1>Box OAuth Complete</h1><p>Tokens saved for ${email}. You can close this window.</p>`
-      );
-    } catch (err: any) {
-      res.status(500).send(`Box OAuth error: ${err.message}`);
     }
   });
 

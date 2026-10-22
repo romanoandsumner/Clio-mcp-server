@@ -26,7 +26,6 @@ let server: Server;
 let base: string;
 
 beforeAll(async () => {
-  delete process.env.UPLOAD_SECRET; // shared-secret path off → isolate the per-user path
   const app = express();
   app.use(uploadRouter);
   await new Promise<void>((resolve) => {
@@ -73,10 +72,22 @@ describe("per-user upload key", () => {
     );
   });
 
-  it("an unknown key with no shared secret → 401", async () => {
+  it("an unknown key → 401", async () => {
     const r = await fetch(`${base}/upload`, {
       method: "POST", headers: { "X-Upload-Secret": "bogus" }, body: form({ parent_folder_id: "123" }),
     });
     expect(r.status).toBe(401);
+  });
+
+  it("the retired shared UPLOAD_SECRET no longer authorizes anything", async () => {
+    process.env.UPLOAD_SECRET = "old-shared-secret";
+    try {
+      const r = await fetch(`${base}/upload`, {
+        method: "POST", headers: { "X-Upload-Secret": "old-shared-secret" }, body: form({ parent_folder_id: "123" }),
+      });
+      expect(r.status).toBe(401);
+    } finally {
+      delete process.env.UPLOAD_SECRET;
+    }
   });
 });

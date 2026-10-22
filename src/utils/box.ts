@@ -1,7 +1,6 @@
 import { boxUploadFile, boxUploadNewVersion, boxUploadFileWithToken, boxUploadNewVersionWithToken, boxDownloadFile, boxDeleteFile, boxFindFileInFolder } from "../box/client";
 import { refreshBoxTokensRaw } from "../box/auth";
 import { getBoxTokens, updateBoxTokens } from "../auth/vault";
-import { getBoxRegisteredUsers } from "./tokenStore";
 import { registerDownload, mimeForFilename } from "./downloadStore";
 
 // =====================================================================
@@ -92,11 +91,7 @@ function extractConflictId(err: any): string | null {
  * Download a file from Box by its file ID.
  */
 export async function downloadFromBox(fileId: string): Promise<Buffer> {
-  const users = getBoxRegisteredUsers();
-  if (users.length === 0) {
-    throw new Error("No Box user authenticated. Visit /box/oauth/start to connect your Box account.");
-  }
-  return boxDownloadFile(fileId, users[0]);
+  return boxDownloadFile(fileId);
 }
 
 /**
@@ -105,10 +100,8 @@ export async function downloadFromBox(fileId: string): Promise<Buffer> {
  * download prior contents.
  */
 export async function findBoxFileId(folderId: string, fileName: string): Promise<string | null> {
-  const users = getBoxRegisteredUsers();
-  if (users.length === 0) return null;
   try {
-    return await boxFindFileInFolder(folderId, fileName, users[0]);
+    return await boxFindFileInFolder(folderId, fileName);
   } catch (e: any) {
     console.warn(`[Box] findBoxFileId failed for ${fileName}: ${e?.message ?? e}`);
     return null;
@@ -128,10 +121,8 @@ export async function createBoxFile(opts: {
 }): Promise<UploadResult> {
   const { buffer, filename, folderId } = opts;
   const size_kb = Math.round(buffer.length / 1024);
-  const users = getBoxRegisteredUsers();
-  if (users.length === 0) return fallback(buffer, filename, "no-box-user-authenticated");
   try {
-    const meta = await boxUploadFile(buffer, filename, folderId, users[0]);
+    const meta = await boxUploadFile(buffer, filename, folderId);
     return {
       uploaded: true,
       box_file_id: meta.id,
@@ -150,8 +141,9 @@ export async function createBoxFile(opts: {
 }
 
 /**
- * Per-user upload: act as a SPECIFIC attorney's Box account, using their Box
- * token from the platform vault (not the shared service account). On a 401 the
+ * Per-user upload: act as a SPECIFIC attorney's Box account (the owner of an
+ * upload key, not the in-flight /mcp caller), using their Box token from the
+ * platform vault. On a 401 the
  * token is refreshed against Box and the rotated pair is written BACK to the
  * vault (never the local store / Railway env). Returns a discriminated result
  * like uploadToBox; all failures resolve to { uploaded: false } so the route
@@ -220,16 +212,10 @@ export async function uploadToBox(opts: {
     `[Box] upload start filename=${filename} size_kb=${size_kb} folderId=${folderId} overwriteFileId=${overwriteFileId ?? "<none>"}`,
   );
 
-  const users = getBoxRegisteredUsers();
-  if (users.length === 0) {
-    return fallback(buffer, filename, "no-box-user-authenticated");
-  }
-  const userEmail = users[0];
-
   // ───── Path 1: direct version (only if caller gave us an ID) ─────
   if (overwriteFileId) {
     try {
-      const meta = await boxUploadNewVersion(buffer, filename, overwriteFileId, userEmail);
+      const meta = await boxUploadNewVersion(buffer, filename, overwriteFileId);
       const elapsed_ms = Date.now() - start;
       console.log(
         `[Box] upload ok via=direct_version filename=${filename} file_id=${meta.id} size_kb=${size_kb} elapsed_ms=${elapsed_ms}`,
@@ -269,14 +255,14 @@ export async function uploadToBox(opts: {
   // back to a download link (per caller's contract: don't silently
   // create new Box files).
   try {
-    const meta = await boxUploadFile(buffer, filename, folderId, userEmail);
+    const meta = await boxUploadFile(buffer, filename, folderId);
     // Unexpected success — Box accepted our probe as a real new-file
     // upload. Clean up the orphan and return a DL link instead.
     console.warn(
       `[Box] conflict_lookup UNEXPECTED_SUCCESS filename=${filename} file_id=${meta.id} — deleting orphan and falling back to direct_download_url`,
     );
     try {
-      await boxDeleteFile(meta.id, userEmail);
+      await boxDeleteFile(meta.id);
       console.log(`[Box] orphan deleted file_id=${meta.id}`);
     } catch (delErr: any) {
       console.error(
@@ -296,7 +282,7 @@ export async function uploadToBox(opts: {
         return fallback(buffer, filename, `409_no_conflict_id msg=${boxMsg}`);
       }
       try {
-        const meta = await boxUploadNewVersion(buffer, filename, conflictId, userEmail);
+        const meta = await boxUploadNewVersion(buffer, filename, conflictId);
         const elapsed_ms = Date.now() - start;
         console.log(
           `[Box] upload ok via=conflict_lookup_version filename=${filename} file_id=${meta.id} size_kb=${size_kb} elapsed_ms=${elapsed_ms}`,

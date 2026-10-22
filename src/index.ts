@@ -28,7 +28,6 @@ const httpServer = app.listen(PORT, () => {
   console.log(`  MCP:       http://localhost:${PORT}/mcp (Streamable HTTP, stateless)`);
   console.log(`  MCP (RO):  http://localhost:${PORT}/mcp/readonly (query tools only)`);
   console.log(`  Discovery: ${BASE_URL}/.well-known/oauth-protected-resource`);
-  console.log(`  Box OAuth: http://localhost:${PORT}/box/oauth/start`);
   console.log(`  Auth:      per-user Microsoft OAuth (Bearer JWT required)`);
   // Which of the optional auth paths are actually live. Both are opt-in, and
   // "I set the variable but it isn't working" is otherwise invisible until a
