@@ -32,7 +32,6 @@ import { registerCustomFieldTools } from "./tools/customFields";
 import { registerDocumentTools } from "./tools/documents";
 import { registerAuditTools } from "./tools/audit";
 import { registerAuditTimeTools } from "./tools/auditTime";
-import { registerReviewTools } from "./tools/review";
 import { registerMorningReportTools } from "./tools/morningReport";
 import { registerVersionTools } from "./tools/version";
 import { registerWhoAmITools } from "./tools/whoami";
@@ -47,7 +46,6 @@ import { registerClioPaymentsTools } from "./tools/clioPayments";
 import { registerBillingExtrasTools } from "./tools/billingExtras";
 import { registerBillsGapTools } from "./tools/billsGap";
 import { registerBillSentTools } from "./tools/billSent";
-import reviewRouter from "./routes/review";
 import uploadRouter from "./routes/upload";
 import { getDownload } from "./utils/downloadStore";
 import { CLIO_ICON_PNG, CLIO_ICON_DATA_URI } from "./branding/clioIcon";
@@ -100,7 +98,6 @@ export function createMcpServer(profile: ToolProfile = "full"): McpServer {
     registerAuditTools(server);
     registerAuditTimeTools(server);
     registerMorningReportTools(server);
-    registerReviewTools(server);
     registerVersionTools(server);
     registerWhoAmITools(server);
     registerNoteTools(server);
@@ -346,9 +343,6 @@ export function createApp(): express.Express {
     );
     res.end(entry.buffer);
   });
-
-  // --- Review UI Routes ---
-  app.use(reviewRouter);
 
   // --- Binary upload → Box (auth via X-Upload-Secret; see routes/upload.ts) ---
   app.use(uploadRouter);

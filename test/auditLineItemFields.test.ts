@@ -10,7 +10,7 @@ const src = (rel: string) => readFileSync(join(here, "..", rel), "utf8");
 // Regression guard for the draft-bill audit bug: the /line_items endpoint
 // does NOT support `rounded_quantity` (that field lives on /activities).
 // Requesting it returns 400 InvalidFields, which broke audit_draft_bills,
-// download_bill_audit, and the interactive review route. It also means
+// and download_bill_audit. It also means
 // /line_items `quantity` is already decimal HOURS (not seconds), so the
 // hours math must not divide by 3600.
 describe("audit /line_items field selector", () => {
@@ -24,9 +24,9 @@ describe("audit /line_items field selector", () => {
 
   it("no /line_items query in the codebase asks for rounded_quantity", () => {
     // /line_items quantity is hours; rounded_quantity only exists on
-    // /activities. Guard both the audit tool and the review route against a
-    // copy-paste reintroduction of the field.
-    for (const rel of ["src/tools/audit.ts", "src/routes/review.ts"]) {
+    // /activities. Guard the audit tool against a copy-paste reintroduction
+    // of the field.
+    for (const rel of ["src/tools/audit.ts"]) {
       const text = src(rel);
       const lineItemQueries = text.match(/"\/line_items"[\s\S]{0,600}?bill_id/g) ?? [];
       for (const q of lineItemQueries) {
