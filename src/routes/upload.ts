@@ -1,7 +1,6 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { uploadToBox, createBoxFile, uploadToBoxAsUser } from "../utils/box";
+import { uploadToBoxAsUser } from "../utils/box";
 import { resolveUploadKey } from "../auth/vault";
 
 // =====================================================================
@@ -16,14 +15,11 @@ import { resolveUploadKey } from "../auth/vault";
 //   field  file_id            Box file id   → upload a NEW VERSION (/version)
 //   field  file_name          name to store as (falls back to the filename)
 //
-// Auth (X-Upload-Secret header), two kinds of credential:
-//   1. A PER-USER upload key (resolveUploadKey → owning attorney). The upload
-//      runs as THAT attorney's own Box account, using their Box token from the
-//      platform vault. This is the per-user path.
-//   2. The legacy shared UPLOAD_SECRET → the shared service Box account
-//      (getBoxRegisteredUsers()[0]). Kept as a fallback.
-// A per-user key takes precedence; if the upload_keys table isn't provisioned
-// yet, resolveUploadKey returns null and we fall back to the shared secret.
+// Auth (X-Upload-Secret header): a PER-USER upload key (resolveUploadKey →
+// owning attorney). The upload runs as THAT attorney's own Box account, using
+// their Box token from the platform vault. The old shared UPLOAD_SECRET, which
+// uploaded as one shared Box login for everyone, is gone; UPLOAD_SECRET is no
+// longer read.
 // =====================================================================
 
 const router = Router();
@@ -37,38 +33,22 @@ const memUpload = multer({
   limits: { fileSize: MAX_UPLOAD_BYTES },
 }).single("file");
 
-// Constant-time check of the presented secret against the shared UPLOAD_SECRET.
-function sharedSecretMatches(req: Request): boolean {
-  const expected = process.env.UPLOAD_SECRET;
-  if (!expected) {
-    console.error("[Upload] UPLOAD_SECRET is not set — shared-secret path disabled (fail closed)");
-    return false;
-  }
-  const provided = req.headers["x-upload-secret"];
-  if (typeof provided !== "string" || !provided) return false;
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
-}
-
-type Auth = { kind: "user"; userId: string } | { kind: "shared" };
+type Auth = { kind: "user"; userId: string };
 type Target = { create: string } | { version: string };
 
-// Resolve who the request acts as: a per-user upload key (→ that attorney) or
-// the shared secret (→ service account). Null = unauthorized.
+// Resolve which attorney the request acts as, from their upload key.
+// Null = unauthorized.
 async function resolveUploadAuth(req: Request): Promise<Auth | null> {
   const presented = req.headers["x-upload-secret"];
-  if (typeof presented === "string" && presented) {
-    try {
-      const owner = await resolveUploadKey(presented);
-      if (owner) return { kind: "user", userId: owner.userId };
-    } catch (e: any) {
-      // Vault unavailable / lookup failed — don't lock out the shared path.
-      console.error(`[Upload] upload-key lookup failed, falling back to shared secret: ${e?.message ?? e}`);
-    }
+  if (typeof presented !== "string" || !presented) return null;
+  try {
+    const owner = await resolveUploadKey(presented);
+    return owner ? { kind: "user", userId: owner.userId } : null;
+  } catch (e: any) {
+    // Vault unavailable / lookup failed: fail closed.
+    console.error(`[Upload] upload-key lookup failed: ${e?.message ?? e}`);
+    return null;
   }
-  if (sharedSecretMatches(req)) return { kind: "shared" };
-  return null;
 }
 
 async function dispatchToBox(
@@ -80,13 +60,7 @@ async function dispatchToBox(
   | { uploaded: true; box_file_id: string; filename: string; version?: string }
   | { uploaded: false; reason?: string; note?: string }
 > {
-  if (auth.kind === "user") {
-    return uploadToBoxAsUser({ buffer, filename, userId: auth.userId, target });
-  }
-  // Shared service account (legacy).
-  return "version" in target
-    ? uploadToBox({ buffer, filename, folderId: "", overwriteFileId: target.version })
-    : createBoxFile({ buffer, filename, folderId: target.create });
+  return uploadToBoxAsUser({ buffer, filename, userId: auth.userId, target });
 }
 
 // Shared route body: auth → parse multipart → derive target → upload → respond.
@@ -143,7 +117,7 @@ function makeUploadHandler(
             file_name: result.filename,
             version: result.version ?? null,
             size: buffer.length,
-            acted_as: auth.kind, // "user" = the attorney's own Box; "shared" = service account
+            acted_as: auth.kind, // always "user": the attorney's own Box account
           });
         } catch (e: any) {
           console.error(`[Upload] unexpected failure filename=${fileName}: ${e?.message ?? e}`);

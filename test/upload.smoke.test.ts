@@ -2,9 +2,16 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import express from "express";
 import type { Server } from "node:http";
 
-// No per-user upload key in these tests → resolveUploadKey returns null, so the
-// route uses the shared-secret path (no DB needed).
-vi.mock("../src/auth/vault", () => ({ resolveUploadKey: vi.fn(async () => null) }));
+// "test-secret" is a per-user upload key for attorney user 7, who has not
+// connected Box (getBoxTokens → null), so a valid request reaches the Box layer
+// and comes back as the not-connected fallback. No DB needed.
+vi.mock("../src/auth/vault", () => ({
+  resolveUploadKey: vi.fn(async (key: string) =>
+    key === "test-secret" ? { userId: "7", email: "someone@firm.com" } : null
+  ),
+  getBoxTokens: vi.fn(async () => null),
+  updateBoxTokens: vi.fn(async () => undefined),
+}));
 
 import uploadRouter from "../src/routes/upload";
 
@@ -12,7 +19,6 @@ let server: Server;
 let base: string;
 
 beforeAll(async () => {
-  process.env.UPLOAD_SECRET = "test-secret";
   const app = express();
   app.use(uploadRouter);
   await new Promise<void>((resolve) => {
@@ -65,17 +71,17 @@ describe("POST /upload", () => {
     expect((await r.json()).error).toMatch(/file/);
   });
 
-  it("valid request reaches Box layer (502 fallback when no Box user)", async () => {
+  it("valid request reaches Box layer (502 when the attorney has not connected Box)", async () => {
     const r = await fetch(`${base}/upload`, {
       method: "POST", headers: { "X-Upload-Secret": "test-secret" },
       body: form({ parent_folder_id: "123" }),
     });
-    // Auth + parse + validation all passed; Box helper returns its no-user
-    // fallback, which the route maps to 502.
+    // Auth + parse + validation all passed; the attorney has no Box login in
+    // the vault, which the route maps to 502.
     expect(r.status).toBe(502);
     const body = await r.json();
     expect(body.ok).toBe(false);
-    expect(body.error).toMatch(/no-box-user-authenticated/);
+    expect(body.error).toMatch(/box-not-connected-for-user/);
   });
 });
 
@@ -102,7 +108,7 @@ describe("POST /version", () => {
     expect((await r.json()).error).toMatch(/file/);
   });
 
-  it("valid request reaches Box layer (502 fallback when no Box user)", async () => {
+  it("valid request reaches Box layer (502 when the attorney has not connected Box)", async () => {
     const r = await fetch(`${base}/version`, {
       method: "POST", headers: { "X-Upload-Secret": "test-secret" },
       body: form({ file_id: "2310830265427" }),
@@ -110,6 +116,6 @@ describe("POST /version", () => {
     expect(r.status).toBe(502);
     const body = await r.json();
     expect(body.ok).toBe(false);
-    expect(body.error).toMatch(/no-box-user-authenticated/);
+    expect(body.error).toMatch(/box-not-connected-for-user/);
   });
 });

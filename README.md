@@ -68,7 +68,8 @@ curl http://localhost:3000/health
    At minimum: `DATABASE_URL` (the `noe_app` public-proxy URL), `APP_KEK_B64` (identical to the platform),
    `MS_TENANT_ID`, `MS_CLIENT_ID` (+ `MS_CLIENT_SECRET` if confidential), `MCP_AUDIENCE`, `MCP_SCOPE_NAME`,
    `ALLOWED_EMAILS`/`ALLOWED_EMAIL_DOMAINS`, `CLIO_CLIENT_ID`, `CLIO_CLIENT_SECRET`, and `PUBLIC_BASE_URL`.
-   Set `UPLOAD_SECRET` too if you use the [binary upload endpoint](#binary-upload-endpoint-post-upload).
+   Set `BOX_CLIENT_ID` / `BOX_CLIENT_SECRET` (the platform's Box app) if you use the Box-backed tools or
+   the [binary upload endpoint](#binary-upload-endpoint-post-upload).
 5. Deploy
 6. Test: `curl https://your-railway-url.up.railway.app/health` (expect `"transport":"streamable-http-stateless"`)
 
@@ -199,22 +200,14 @@ platform can actually use the tools.
 
 A plain `multipart/form-data` route for streaming a binary file (`.docx` / `.pdf` /
 `.xlsx`) straight into Box — created as a new file or versioned onto an existing one.
-It reuses the same Box upload code as the dashboard updater (`uploadToBox` /
-`createBoxFile`), so a remote client can `curl -F` raw bytes instead of base64-ing a
-binary into an MCP tool argument.
+A remote client can `curl -F` raw bytes instead of base64-ing a binary into an MCP
+tool argument.
 
-**Auth:** send a secret in the `X-Upload-Secret` header. It's resolved as one of two
-credentials (a mismatch on both returns `401`):
-
-- A **per-user upload key** (issued per attorney on the platform `/setup`, looked up by
-  hash in `upload_keys`). The upload then runs as **that attorney's own Box account**,
-  using their Box token from the vault. The response includes `"acted_as": "user"`.
-- The legacy **shared `UPLOAD_SECRET`** (constant-time compared) → the shared service Box
-  account. Response includes `"acted_as": "shared"`.
-
-A per-user key takes precedence; if `upload_keys` isn't provisioned yet, the shared
-secret is used. Setting neither (or an unset `UPLOAD_SECRET` with no matching key)
-rejects all requests.
+**Auth:** send your **per-user upload key** in the `X-Upload-Secret` header. Keys are
+issued per attorney on the platform `/setup` page and looked up by hash in
+`upload_keys`. The upload runs as **that attorney's own Box account**, using their Box
+token from the vault; the response includes `"acted_as": "user"`. An unknown key, or
+none, returns `401`. The old shared `UPLOAD_SECRET` is no longer accepted.
 
 **Form fields:**
 
@@ -242,20 +235,20 @@ omitted it. On a Box failure the route returns `502` with `{ "ok": false, "error
 ```bash
 # Create a NEW file in a Box folder
 curl -X POST https://your-railway-url.up.railway.app/upload \
-  -H "X-Upload-Secret: $UPLOAD_SECRET" \
+  -H "X-Upload-Secret: $UPLOAD_KEY" \
   -F "file=@./report.pdf" \
   -F "parent_folder_id=390781679459" \
   -F "file_name=Q2 Report.pdf"
 
 # Upload a NEW VERSION of an existing Box file
 curl -X POST https://your-railway-url.up.railway.app/upload \
-  -H "X-Upload-Secret: $UPLOAD_SECRET" \
+  -H "X-Upload-Secret: $UPLOAD_KEY" \
   -F "file=@./report.pdf" \
   -F "overwrite_file_id=1234567890"
 ```
 
-> The uploading Box account is the one connected via `/box/oauth/start`. If no Box
-> account is connected the endpoint returns `502`.
+> If the key's attorney hasn't connected Box on the platform `/setup` page, the
+> endpoint returns `502` with `box-not-connected-for-user`.
 
 ### `POST /version` — version an existing file (one-shot)
 
@@ -273,7 +266,7 @@ same path `/upload` takes when given `overwrite_file_id`.
 
 ```bash
 curl -X POST https://your-railway-url.up.railway.app/version \
-  -H "X-Upload-Secret: $UPLOAD_SECRET" \
+  -H "X-Upload-Secret: $UPLOAD_KEY" \
   -F "file=@./petition.docx" \
   -F "file_id=2310830265427"
 ```

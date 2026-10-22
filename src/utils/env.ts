@@ -150,10 +150,9 @@ export const ENV = {
     // author when unset (see src/clio/owner.ts).
     get OWNER_EMAILS() { return process.env.OWNER_EMAILS ?? ""; },
 
-    // --- Box (unchanged — out of scope) ---
+    // --- Box (the platform's Box app; used only to refresh vault tokens) ---
     get BOX_CLIENT_ID() { return getEnv("BOX_CLIENT_ID", ""); },
     get BOX_CLIENT_SECRET() { return getEnv("BOX_CLIENT_SECRET", ""); },
-    get BOX_REDIRECT_URI() { return getEnv("BOX_REDIRECT_URI", "https://clio-mcp-server-production-032d.up.railway.app/box/oauth/callback"); },
     // Public, externally reachable origin for this server. Used both for
     // /download/:token URLs (Box upload fallback) and as the OAuth
     // `baseUrl` advertised in the discovery + proxy endpoints.

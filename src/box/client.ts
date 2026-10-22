@@ -1,7 +1,8 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from "axios";
 import FormData from "form-data";
-import { getBoxAccessToken } from "../utils/tokenStore";
-import { refreshBoxAccessToken } from "./auth";
+import { als } from "../auth/identity";
+import { getBoxTokens, updateBoxTokens } from "../auth/vault";
+import { refreshBoxTokensRaw } from "./auth";
 
 const BOX_API_BASE = "https://api.box.com/2.0";
 const BOX_UPLOAD_BASE = "https://upload.box.com/api/2.0";
@@ -18,12 +19,77 @@ export interface BoxFileMetadata {
   parent?: { id: string; name: string };
 }
 
-function attachInterceptors(client: AxiosInstance, userEmail: string): void {
-  client.interceptors.request.use((config) => {
-    const token = getBoxAccessToken(userEmail);
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+// ───── Whose Box account ─────
+// Box calls act as the attorney making the /mcp request, with the Box login
+// they connected on the platform's /setup page, read from the encrypted vault
+// -- the same model as Clio. There is no shared Box login: the server used to
+// keep one person's Box tokens in memory and in a plaintext Railway variable
+// and act as them for everyone.
+
+interface BoxSession {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+}
+
+async function callerBoxSession(): Promise<BoxSession> {
+  const ctx = als.getStore();
+  if (!ctx) {
+    throw new Error("No user context: Box access is only available inside an authenticated /mcp request.");
+  }
+  const tokens = await getBoxTokens(ctx.userId);
+  if (!tokens) {
+    throw new Error("Box is not connected for your account — connect Box on the platform's /setup page.");
+  }
+  return { userId: ctx.userId, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+}
+
+// Box refresh tokens are single-use, so two concurrent refreshes for one user
+// would burn each other's token. One in-flight refresh per user; callers that
+// arrive meanwhile share its result.
+const refreshLocks = new Map<string, Promise<string>>();
+
+async function refreshSession(session: BoxSession): Promise<string> {
+  const pending = refreshLocks.get(session.userId);
+  if (pending) {
+    // The retry goes back through the request interceptor, which stamps
+    // session.accessToken -- so a waiter must adopt the new token too, or it
+    // retries with the expired one.
+    session.accessToken = await pending;
+    return session.accessToken;
+  }
+
+  const promise = (async () => {
+    // The platform, or another replica, may have rotated the pair since this
+    // session read it. Re-read first: a newer access token means there is
+    // nothing to spend, and an older refresh token would already be burned.
+    const latest = await getBoxTokens(session.userId);
+    if (latest && latest.accessToken !== session.accessToken) {
+      session.accessToken = latest.accessToken;
+      session.refreshToken = latest.refreshToken;
+      return latest.accessToken;
     }
+    const refreshToken = latest?.refreshToken ?? session.refreshToken;
+    const refreshed = await refreshBoxTokensRaw(refreshToken);
+    const nextRefresh = refreshed.refresh_token ?? refreshToken;
+    const expiresAt = refreshed.expires_in ? new Date(Date.now() + refreshed.expires_in * 1000) : null;
+    await updateBoxTokens(session.userId, refreshed.access_token, nextRefresh, expiresAt);
+    session.accessToken = refreshed.access_token;
+    session.refreshToken = nextRefresh;
+    return refreshed.access_token;
+  })();
+
+  refreshLocks.set(session.userId, promise);
+  try {
+    return await promise;
+  } finally {
+    refreshLocks.delete(session.userId);
+  }
+}
+
+function attachInterceptors(client: AxiosInstance, session: BoxSession): void {
+  client.interceptors.request.use((config) => {
+    config.headers.Authorization = `Bearer ${session.accessToken}`;
     return config;
   });
 
@@ -37,9 +103,9 @@ function attachInterceptors(client: AxiosInstance, userEmail: string): void {
 
       if (status === 401 && !originalRequest._retry) {
         originalRequest._retry = true;
-        console.log(`[Box] 401 — refreshing access token for ${userEmail} (${method} ${url})`);
+        console.log(`[Box] 401 — refreshing access token for user ${session.userId} (${method} ${url})`);
         try {
-          const newToken = await refreshBoxAccessToken(userEmail);
+          const newToken = await refreshSession(session);
           originalRequest.headers = {
             ...originalRequest.headers,
             Authorization: `Bearer ${newToken}`,
@@ -47,7 +113,7 @@ function attachInterceptors(client: AxiosInstance, userEmail: string): void {
           return client(originalRequest);
         } catch (refreshErr: any) {
           console.error(
-            `[Box] token refresh FAILED for ${userEmail}: ${refreshErr?.message ?? "unknown"}`,
+            `[Box] token refresh FAILED for user ${session.userId}: ${refreshErr?.message ?? "unknown"}`,
           );
           throw error;
         }
@@ -82,29 +148,28 @@ function attachInterceptors(client: AxiosInstance, userEmail: string): void {
   );
 }
 
-function createUploadClient(userEmail: string): AxiosInstance {
+async function createUploadClient(): Promise<AxiosInstance> {
   const client = axios.create({
     baseURL: BOX_UPLOAD_BASE,
     timeout: 300000,
   });
-  attachInterceptors(client, userEmail);
+  attachInterceptors(client, await callerBoxSession());
   return client;
 }
 
-function createApiClient(userEmail: string): AxiosInstance {
+async function createApiClient(): Promise<AxiosInstance> {
   const client = axios.create({
     baseURL: BOX_API_BASE,
     timeout: 300000,
   });
-  attachInterceptors(client, userEmail);
+  attachInterceptors(client, await callerBoxSession());
   return client;
 }
 
 export async function boxUploadFile(
   fileBuffer: Buffer,
   fileName: string,
-  parentFolderId: string,
-  userEmail: string
+  parentFolderId: string
 ): Promise<BoxFileMetadata> {
   const form = new FormData();
   form.append("attributes", JSON.stringify({
@@ -113,7 +178,7 @@ export async function boxUploadFile(
   }));
   form.append("file", fileBuffer, { filename: fileName });
 
-  const client = createUploadClient(userEmail);
+  const client = await createUploadClient();
   const response = await client.post("/files/content", form, {
     headers: form.getHeaders(),
   });
@@ -124,14 +189,13 @@ export async function boxUploadFile(
 export async function boxUploadNewVersion(
   fileBuffer: Buffer,
   fileName: string,
-  fileId: string,
-  userEmail: string
+  fileId: string
 ): Promise<BoxFileMetadata> {
   const form = new FormData();
   form.append("attributes", JSON.stringify({ name: fileName }));
   form.append("file", fileBuffer, { filename: fileName });
 
-  const client = createUploadClient(userEmail);
+  const client = await createUploadClient();
   const response = await client.post(`/files/${fileId}/content`, form, {
     headers: form.getHeaders(),
   });
@@ -181,11 +245,8 @@ export async function boxUploadNewVersionWithToken(
   return response.data.entries[0];
 }
 
-export async function boxDownloadFile(
-  fileId: string,
-  userEmail: string
-): Promise<Buffer> {
-  const client = createApiClient(userEmail);
+export async function boxDownloadFile(fileId: string): Promise<Buffer> {
+  const client = await createApiClient();
   const response = await client.get(`/files/${fileId}/content`, {
     responseType: "arraybuffer",
   });
@@ -197,11 +258,8 @@ export async function boxDownloadFile(
  * boxUploadFile unexpectedly creates a new file (instead of hitting the
  * expected 409 conflict we use as a lookup mechanism).
  */
-export async function boxDeleteFile(
-  fileId: string,
-  userEmail: string,
-): Promise<void> {
-  const client = createApiClient(userEmail);
+export async function boxDeleteFile(fileId: string): Promise<void> {
+  const client = await createApiClient();
   await client.delete(`/files/${fileId}`);
 }
 
@@ -212,9 +270,8 @@ export async function boxDeleteFile(
 export async function boxFindFileInFolder(
   folderId: string,
   fileName: string,
-  userEmail: string,
 ): Promise<string | null> {
-  const client = createApiClient(userEmail);
+  const client = await createApiClient();
   const limit = 1000;
   for (let offset = 0; ; offset += limit) {
     const resp = await client.get(`/folders/${folderId}/items`, {

@@ -8,7 +8,6 @@ import { buildUserContext, NotProvisionedError } from "./auth/vault";
 import { registerOAuthProxyRoutes } from "./auth/oauthProxy";
 import { resolveStaticApiKey } from "./auth/apiKeys";
 import { applyToolProfile, ToolProfile } from "./tools/profiles";
-import { getBoxAuthorizationUrl, exchangeBoxCodeForTokens } from "./box/auth";
 import {
   getGrowAuthorizationUrl,
   exchangeGrowCodeForTokens,
@@ -32,7 +31,6 @@ import { registerCustomFieldTools } from "./tools/customFields";
 import { registerDocumentTools } from "./tools/documents";
 import { registerAuditTools } from "./tools/audit";
 import { registerAuditTimeTools } from "./tools/auditTime";
-import { registerReviewTools } from "./tools/review";
 import { registerMorningReportTools } from "./tools/morningReport";
 import { registerVersionTools } from "./tools/version";
 import { registerWhoAmITools } from "./tools/whoami";
@@ -47,7 +45,6 @@ import { registerClioPaymentsTools } from "./tools/clioPayments";
 import { registerBillingExtrasTools } from "./tools/billingExtras";
 import { registerBillsGapTools } from "./tools/billsGap";
 import { registerBillSentTools } from "./tools/billSent";
-import reviewRouter from "./routes/review";
 import uploadRouter from "./routes/upload";
 import { getDownload } from "./utils/downloadStore";
 import { CLIO_ICON_PNG, CLIO_ICON_DATA_URI } from "./branding/clioIcon";
@@ -100,7 +97,6 @@ export function createMcpServer(profile: ToolProfile = "full"): McpServer {
     registerAuditTools(server);
     registerAuditTimeTools(server);
     registerMorningReportTools(server);
-    registerReviewTools(server);
     registerVersionTools(server);
     registerWhoAmITools(server);
     registerNoteTools(server);
@@ -347,9 +343,6 @@ export function createApp(): express.Express {
     res.end(entry.buffer);
   });
 
-  // --- Review UI Routes ---
-  app.use(reviewRouter);
-
   // --- Binary upload → Box (auth via X-Upload-Secret; see routes/upload.ts) ---
   app.use(uploadRouter);
 
@@ -386,29 +379,6 @@ export function createApp(): express.Express {
     } catch (err: any) {
       console.error("[grow-oauth] callback failed:", err?.response?.data ?? err.message);
       res.status(500).send(`Grow OAuth error: ${err.message}`);
-    }
-  });
-
-  // --- Box OAuth (unchanged — out of scope) ---
-  app.get("/box/oauth/start", (_req, res) => {
-    const url = getBoxAuthorizationUrl();
-    res.redirect(url);
-  });
-
-  app.get("/box/oauth/callback", async (req, res) => {
-    const code = req.query.code as string;
-    if (!code) {
-      res.status(400).send("Missing authorization code");
-      return;
-    }
-
-    try {
-      const { email } = await exchangeBoxCodeForTokens(code);
-      res.send(
-        `<h1>Box OAuth Complete</h1><p>Tokens saved for ${email}. You can close this window.</p>`
-      );
-    } catch (err: any) {
-      res.status(500).send(`Box OAuth error: ${err.message}`);
     }
   });
 
