@@ -43,12 +43,12 @@ describe("computeBonusData", () => {
     expect(data.KES.rows[0].collections).toBe(2000);
   });
 
-  it("associate cost uses the associate's own row (sheet salary edits flow through); unknown associate adds no cost", () => {
+  it("associate cost is fully loaded from the associate's own row (salary + payroll + overhead share); unknown associate adds no cost", () => {
     const p: BonusAttorney = { ini: "P", salary: 100000, associate: "A,ZZZ", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0 };
     const a: BonusAttorney = { ini: "A", salary: 50000, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0.2 };
-    const data = computeBonusData({}, [p, a], { firmOverhead: 0, numAttorneys: 1, brackets: BRACKETS, mnhSplitAmong: [] });
-    expect(data.P.baseTarget).toBe(160000); // 100000 + 50000*1.2; ZZZ has no row → 0
-    expect(data.A.baseTarget).toBe(60000);
+    const data = computeBonusData({}, [p, a], { firmOverhead: 10000, numAttorneys: 1, brackets: BRACKETS, mnhSplitAmong: [] });
+    expect(data.P.baseTarget).toBe(180000); // 100000 + own OH 10000 + A (50000*1.2 + OH 10000); ZZZ has no row → 0
+    expect(data.A.baseTarget).toBe(70000);  // 50000*1.2 + 10000 — associate's own row is unchanged
   });
 
   it("MNH collections split equally among the configured initials", () => {
@@ -155,11 +155,11 @@ describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10)", () => {
     expect(data.TBS.rows[0].collections).toBe(90);   // own only — unchanged by rolling up to NRN
   });
 
-  it("base targets follow the cost base: partner = salary + para + 17% on both + associate salary×1.17 + overhead/5; associate = salary×1.17 + overhead/5", () => {
+  it("base targets follow the cost base: partner = salary + para + 17% on both + overhead/5 + associate fully loaded (salary×1.17 + overhead/5); associate = salary×1.17 + overhead/5", () => {
     const data = computeBonusData({}, FIRM_BONUS_ATTORNEYS, { firmOverhead: 500000, numAttorneys: 5, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG });
-    expect(data.PAR.baseTarget).toBe(734537.8); // 332340+80000+0.17*412340 + 130000*1.17 (NAF) + 100000
+    expect(data.PAR.baseTarget).toBe(834537.8); // 332340+80000+0.17*412340+100000 + NAF (130000*1.17 + 100000)
     expect(data.KES.baseTarget).toBe(576587.8); // 332340+75000+0.17*407340+100000 (no associate)
-    expect(data.NRN.baseTarget).toBe(682075);   // 255000+75000+0.17*330000 + 167500*1.17 (TBS) + 100000
+    expect(data.NRN.baseTarget).toBe(782075);   // 255000+75000+0.17*330000+100000 + TBS (167500*1.17 + 100000)
     expect(data.NAF.baseTarget).toBe(252100);   // 130000+0.17*130000+100000
     expect(data.MNH.baseTarget).toBe(228700);
     expect(data.TBS.baseTarget).toBe(295975);

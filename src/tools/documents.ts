@@ -2087,7 +2087,7 @@ export function registerDocumentTools(server: McpServer): void {
           // ---- CREATE / UPDATE BONUS CONFIG SHEET ----
           // Attribution model (FIRM_BONUS_ATTORNEYS, src/dashboard/bonus.ts):
           // partners credit own + associate + paralegal collections (their base
-          // target carries the associate's and para's cost); associates credit
+          // target carries the associate's fully loaded cost and the para's); associates credit
           // their own only. PAR←NAF+ACA, KES←SAB(+AFL tail), NRN←TBS+AKG; MNH
           // rolls up to nobody.
           const BONUS_ATTORNEYS = FIRM_BONUS_ATTORNEYS;
@@ -2159,7 +2159,7 @@ export function registerDocumentTools(server: McpServer): void {
             configSheet.getRow(18).values = [2, 50000, 0.05];
             configSheet.getRow(19).values = [3, 50000, 0.10];
             configSheet.getRow(20).values = [4, "Unlimited", 0.15];
-            configSheet.getRow(22).values = ["Partners credit own + associate + paralegal collections (associate cost in base target); associates their own only"];
+            configSheet.getRow(22).values = ["Partners credit own + associate + paralegal collections (associate fully loaded cost in base target); associates their own only"];
             configSheet.getRow(24).values = ["Paralegal Hours Bonus"];
             configSheet.getRow(24).font = { bold: true };
             configSheet.getRow(25).values = ["Min Hours", "Bonus"];
@@ -3062,7 +3062,7 @@ export function registerDocumentTools(server: McpServer): void {
           configRows.push(xmlRow(18, [xmlCell("A18", 2), xmlCell("B18", 50000, { style: STYLE_CUR }),     xmlCell("C18", 0.05, { style: STYLE_PCT })]));
           configRows.push(xmlRow(19, [xmlCell("A19", 3), xmlCell("B19", 50000, { style: STYLE_CUR }),     xmlCell("C19", 0.10, { style: STYLE_PCT })]));
           configRows.push(xmlRow(20, [xmlCell("A20", 4), xmlCell("B20", "Unlimited"),                     xmlCell("C20", 0.15, { style: STYLE_PCT })]));
-          configRows.push(xmlRow(22, [xmlCell("A22", "Partners credit own + associate + paralegal collections (associate cost in base target); associates their own only")]));
+          configRows.push(xmlRow(22, [xmlCell("A22", "Partners credit own + associate + paralegal collections (associate fully loaded cost in base target); associates their own only")]));
           configRows.push(xmlRow(24, [xmlCell("A24", "Paralegal Hours Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(25, [xmlCell("A25", "Min Hours", { style: STYLE_BOLD }), xmlCell("B25", "Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(26, [xmlCell("A26", 110), xmlCell("B26", 100, { style: STYLE_CUR })]));

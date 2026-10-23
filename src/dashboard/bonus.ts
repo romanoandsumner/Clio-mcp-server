@@ -20,8 +20,8 @@ export type BonusAttorney = {
 // regardless of whose matter the work was on.
 //   - A PARTNER credits own collections + their ASSOCIATE(s)' + their
 //     PARALEGAL(s)'. Base target = own salary + paralegal salary + payroll on
-//     both + each associate's salary and payroll (taken from that associate's
-//     own row) + overhead share.
+//     both + own overhead share + each associate's FULLY LOADED cost (salary,
+//     payroll and overhead share, taken from that associate's own row).
 //   - An ASSOCIATE credits ONLY their own collections; base target = own
 //     salary + payroll on it + overhead share. An associate's row is unchanged
 //     by rolling up to a partner (the same dollars count for both).
@@ -63,13 +63,15 @@ function sumByInitials(mc: Record<string, number>, field: string | undefined): n
   return parseInitials(field).reduce((sum, ini) => sum + (mc[ini] || 0), 0);
 }
 
-// Cost of a partner's associate(s): each associate's salary + payroll on it,
-// read from the associate's own config row (so sheet salary edits flow through).
+// FULLY LOADED cost of a partner's associate(s): each associate's salary +
+// payroll on it + their overhead share, read from the associate's own config
+// row (so sheet salary edits flow through). A partner earns on an associate's
+// collections only after that associate has covered their full cost.
 // An associate with no bonus row contributes no cost.
-function associateCost(atty: BonusAttorney, all: BonusAttorney[]): number {
+function associateCost(atty: BonusAttorney, all: BonusAttorney[], overheadShare: number): number {
   return parseInitials(atty.associate).reduce((sum, ini) => {
     const a = all.find((x) => x.ini.toUpperCase() === ini);
-    return a ? sum + a.salary * (1 + a.payroll) : sum;
+    return a ? sum + a.salary * (1 + a.payroll) + overheadShare : sum;
   }, 0);
 }
 
@@ -145,7 +147,7 @@ export function computeBonusData(
 
   for (const atty of configAttorneys) {
     const baseTarget = atty.salary + atty.paraSalary + atty.legalAsst + (atty.payroll * (atty.salary + atty.paraSalary))
-      + associateCost(atty, configAttorneys) + overheadShare;
+      + associateCost(atty, configAttorneys, overheadShare) + overheadShare;
     const bracketCeilings = [baseTarget, baseTarget + brackets[1].width, baseTarget + brackets[1].width + brackets[2].width];
     const rows: BonusRow[] = [];
     let ytd = 0;
