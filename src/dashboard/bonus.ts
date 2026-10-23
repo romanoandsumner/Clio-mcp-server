@@ -16,31 +16,34 @@ export type BonusAttorney = {
 //
 // Attribution follows the COST BASE: an attorney gets bonus credit for the
 // collections of exactly the people whose cost sits in their base target.
-//   - A PARTNER's base target = own salary + paralegal salary + payroll on
-//     both + overhead share → the partner credits own col-N collections plus
-//     their PARALEGAL(s)' collections. NOT their associate's — the associate's
-//     salary is not in the partner's base target.
-//   - An ASSOCIATE's base target = own salary + payroll on it + overhead
-//     share → the associate credits ONLY their own collections.
-// Consequences (firm-confirmed 2026-08):
-//   - The `associate` field is empty for everyone: no associate's collections
-//     roll up to a partner (previously NAF→PAR / JPB-tail→KES).
+// Collections are col N (by WORKING timekeeper), so credit follows the person
+// regardless of whose matter the work was on.
+//   - A PARTNER credits own collections + their ASSOCIATE(s)' + their
+//     PARALEGAL(s)'. Base target = own salary + paralegal salary + payroll on
+//     both + each associate's salary and payroll (taken from that associate's
+//     own row) + overhead share.
+//   - An ASSOCIATE credits ONLY their own collections; base target = own
+//     salary + payroll on it + overhead share. An associate's row is unchanged
+//     by rolling up to a partner (the same dollars count for both).
+// Team mapping (firm-confirmed 2026-10):
+//   - PAR: associate NAF, paralegal ACA.
+//   - KES: paralegal SAB (+ AFL's tail — Anna Lozano, departed, so her
+//     ongoing collections keep crediting KES until they stop). No associate.
+//   - NRN: associate TBS, paralegal AKG.
+//   - MNH (departing) rolls up to nobody: neither her collections nor her
+//     cost go to any partner (MNH_SPLIT_AMONG is empty).
 //   - JPB (terminated Jul 2026) has no row and credits nobody; his 26 Compare
 //     col-N row remains for firm-total reconciliation only.
-//   - AFL (Anna Lozano, departed) stays in KES's PARALEGAL list so her
-//     ongoing collections keep crediting KES until they stop.
-//   - MNH is an associate, so the old "split MNH's collections among
-//     PAR/KES/NRN" rule is gone (MNH_SPLIT_AMONG is empty).
 export const FIRM_BONUS_ATTORNEYS: BonusAttorney[] = [
-  { ini: "PAR", salary: 332340, associate: "", paralegal: "ACA",     paraSalary: 80000, legalAsst: 0, payroll: 0.17 },
-  { ini: "KES", salary: 332340, associate: "", paralegal: "SAB,AFL", paraSalary: 75000, legalAsst: 0, payroll: 0.17 }, // Stacy (current) + Anna's tail
-  { ini: "NRN", salary: 255000, associate: "", paralegal: "AKG",     paraSalary: 75000, legalAsst: 0, payroll: 0.17 },
+  { ini: "PAR", salary: 332340, associate: "NAF", paralegal: "ACA",     paraSalary: 80000, legalAsst: 0, payroll: 0.17 },
+  { ini: "KES", salary: 332340, associate: "",    paralegal: "SAB,AFL", paraSalary: 75000, legalAsst: 0, payroll: 0.17 }, // Stacy (current) + Anna's tail
+  { ini: "NRN", salary: 255000, associate: "TBS", paralegal: "AKG",     paraSalary: 75000, legalAsst: 0, payroll: 0.17 },
   { ini: "NAF", salary: 130000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "MNH", salary: 110000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "TBS", salary: 167500, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
 ];
 
-// No shared-associate split: partners credit own + paralegal collections only.
+// No shared-associate split: MNH's collections and cost go to no partner.
 export const MNH_SPLIT_AMONG: string[] = [];
 export type BonusBracket = { width: number; rate: number };
 export type BonusRow = {
@@ -51,13 +54,23 @@ export type BonusData = Record<string, { baseTarget: number; rows: BonusRow[] }>
 
 // Sum collections for a (possibly multi-initial) associate/paralegal field.
 // Accepts a single initial ("AFL") or a comma/plus/slash list ("SAB,AFL").
+function parseInitials(field: string | undefined): string[] {
+  if (!field) return [];
+  return field.split(/[,+/]/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+}
+
 function sumByInitials(mc: Record<string, number>, field: string | undefined): number {
-  if (!field) return 0;
-  return field
-    .split(/[,+/]/)
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean)
-    .reduce((sum, ini) => sum + (mc[ini] || 0), 0);
+  return parseInitials(field).reduce((sum, ini) => sum + (mc[ini] || 0), 0);
+}
+
+// Cost of a partner's associate(s): each associate's salary + payroll on it,
+// read from the associate's own config row (so sheet salary edits flow through).
+// An associate with no bonus row contributes no cost.
+function associateCost(atty: BonusAttorney, all: BonusAttorney[]): number {
+  return parseInitials(atty.associate).reduce((sum, ini) => {
+    const a = all.find((x) => x.ini.toUpperCase() === ini);
+    return a ? sum + a.salary * (1 + a.payroll) : sum;
+  }, 0);
 }
 
 /**
@@ -70,8 +83,7 @@ function sumByInitials(mc: Record<string, number>, field: string | undefined): n
  * still carried pre-decision mappings (PAR crediting JPB, KES crediting TBS,
  * AFL's tail dropped) and overrode the corrected defaults on every run. The
  * current model lives in FIRM_BONUS_ATTORNEYS: partners credit own +
- * paralegal collections only (no associate credit), associates credit their
- * own only.
+ * associate + paralegal collections, associates credit their own only.
  *
  * RULES:
  * - The ROSTER (which attorneys have bonus rows) and the ATTRIBUTION fields
@@ -132,7 +144,8 @@ export function computeBonusData(
   const bonusData: BonusData = {};
 
   for (const atty of configAttorneys) {
-    const baseTarget = atty.salary + atty.paraSalary + atty.legalAsst + (atty.payroll * (atty.salary + atty.paraSalary)) + overheadShare;
+    const baseTarget = atty.salary + atty.paraSalary + atty.legalAsst + (atty.payroll * (atty.salary + atty.paraSalary))
+      + associateCost(atty, configAttorneys) + overheadShare;
     const bracketCeilings = [baseTarget, baseTarget + brackets[1].width, baseTarget + brackets[1].width + brackets[2].width];
     const rows: BonusRow[] = [];
     let ytd = 0;
