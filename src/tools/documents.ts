@@ -2086,10 +2086,11 @@ export function registerDocumentTools(server: McpServer): void {
           _step = "creating Bonus Config";
           // ---- CREATE / UPDATE BONUS CONFIG SHEET ----
           // Attribution model (FIRM_BONUS_ATTORNEYS, src/dashboard/bonus.ts):
-          // partners credit own + associate + paralegal collections (their base
-          // target carries the associate's fully loaded cost and the para's); associates credit
-          // their own only. PAR←NAF+ACA, KES←SAB(+AFL tail), NRN←TBS+AKG; MNH
-          // rolls up to nobody.
+          // partner targets are the fixed team-cost targets from the 9/28/26
+          // memo (sheet "Target" column); partners credit the SUM of own +
+          // associate + paralegal individual (col N) collections; associates
+          // credit their own only. PAR←NAF+ACA, KES←JPB+SAB+AFL, NRN←TBS+AKG;
+          // MNH rolls up to nobody.
           const BONUS_ATTORNEYS = FIRM_BONUS_ATTORNEYS;
           const FIRM_OVERHEAD = 500000;
           const NUM_ATTORNEYS = 5;
@@ -2113,7 +2114,7 @@ export function registerDocumentTools(server: McpServer): void {
             // associate + paralegal collections, with "SAB,AFL" keeping Anna's
             // tail on KES; associates credit their own only; no standalone JPB
             // row), while
-            // salary/paraSalary/legalAsst/payroll stay sheet-editable. Previously
+            // salary/paraSalary/legalAsst/payroll/target stay sheet-editable. Previously
             // the sheet was used verbatim and then rewritten from itself, so a
             // stale sheet overrode every code fix forever (PAR credited JPB; KES
             // credited TBS — double-counting an attorney with his own bonus row —
@@ -2131,6 +2132,7 @@ export function registerDocumentTools(server: McpServer): void {
                 paraSalary: Number(row.getCell(5).value) || 0,
                 legalAsst: Number(row.getCell(6).value) || 0,
                 payroll: Number(row.getCell(7).value) || 0.17,
+                target: Number(row.getCell(8).value) || 0, // H "Target" — blank → code default
               });
             }
             const reconciled = reconcileBonusConfig(readAttorneys, BONUS_ATTORNEYS);
@@ -2144,11 +2146,11 @@ export function registerDocumentTools(server: McpServer): void {
             configSheet.getRow(1).values = ["Bonus Configuration"];
             configSheet.getRow(1).font = { bold: true, size: 14 };
             configSheet.getRow(3).values = [];
-            configSheet.getRow(4).values = ["Attorney", "Base Salary", "Associate", "Paralegal", "Para Salary", "Legal Asst", "Payroll %"];
+            configSheet.getRow(4).values = ["Attorney", "Base Salary", "Associate", "Paralegal", "Para Salary", "Legal Asst", "Payroll %", "Target"];
             configSheet.getRow(4).font = { bold: true };
             for (let i = 0; i < BONUS_ATTORNEYS.length; i++) {
               const a = BONUS_ATTORNEYS[i];
-              configSheet.getRow(5 + i).values = [a.ini, a.salary, a.associate, a.paralegal, a.paraSalary, a.legalAsst, a.payroll];
+              configSheet.getRow(5 + i).values = [a.ini, a.salary, a.associate, a.paralegal, a.paraSalary, a.legalAsst, a.payroll, a.target || null];
             }
             configSheet.getRow(13).values = ["Firm Overhead", FIRM_OVERHEAD];
             configSheet.getRow(13).font = { bold: true };
@@ -2159,7 +2161,7 @@ export function registerDocumentTools(server: McpServer): void {
             configSheet.getRow(18).values = [2, 50000, 0.05];
             configSheet.getRow(19).values = [3, 50000, 0.10];
             configSheet.getRow(20).values = [4, "Unlimited", 0.15];
-            configSheet.getRow(22).values = ["Partners credit own + associate + paralegal collections (associate fully loaded cost in base target); associates their own only"];
+            configSheet.getRow(22).values = ["Partner targets per the 9/28/26 memo (Target col, trued up in Dec); credit = sum of own + associate + paralegal individual collections; associates their own only"];
             configSheet.getRow(24).values = ["Paralegal Hours Bonus"];
             configSheet.getRow(24).font = { bold: true };
             configSheet.getRow(25).values = ["Min Hours", "Bonus"];
@@ -3042,10 +3044,11 @@ export function registerDocumentTools(server: McpServer): void {
             xmlCell("E4", "Para Salary", { style: STYLE_BOLD }),
             xmlCell("F4", "Legal Asst",  { style: STYLE_BOLD }),
             xmlCell("G4", "Payroll %",   { style: STYLE_BOLD }),
+            xmlCell("H4", "Target",      { style: STYLE_BOLD }),
           ]));
           for (let i = 0; i < configAttorneys.length; i++) {
             const a = configAttorneys[i];
-            configRows.push(xmlRow(5 + i, [
+            const cells = [
               xmlCell(`A${5+i}`, a.ini,        { style: STYLE_BOLD }),
               xmlCell(`B${5+i}`, a.salary,     { style: STYLE_CUR }),
               xmlCell(`C${5+i}`, a.associate),
@@ -3053,7 +3056,10 @@ export function registerDocumentTools(server: McpServer): void {
               xmlCell(`E${5+i}`, a.paraSalary, { style: STYLE_CUR }),
               xmlCell(`F${5+i}`, a.legalAsst,  { style: STYLE_CUR }),
               xmlCell(`G${5+i}`, a.payroll,    { style: STYLE_PCT }),
-            ]));
+            ];
+            // H "Target": fixed base target (partners); blank = salary/overhead formula.
+            if ((a.target ?? 0) > 0) cells.push(xmlCell(`H${5+i}`, a.target!, { style: STYLE_CUR }));
+            configRows.push(xmlRow(5 + i, cells));
           }
           configRows.push(xmlRow(13, [xmlCell("A13", "Firm Overhead",  { style: STYLE_BOLD }), xmlCell("B13", firmOverhead, { style: STYLE_CUR })]));
           configRows.push(xmlRow(14, [xmlCell("A14", "# of Attorneys", { style: STYLE_BOLD }), xmlCell("B14", numAttorneys)]));
@@ -3062,7 +3068,7 @@ export function registerDocumentTools(server: McpServer): void {
           configRows.push(xmlRow(18, [xmlCell("A18", 2), xmlCell("B18", 50000, { style: STYLE_CUR }),     xmlCell("C18", 0.05, { style: STYLE_PCT })]));
           configRows.push(xmlRow(19, [xmlCell("A19", 3), xmlCell("B19", 50000, { style: STYLE_CUR }),     xmlCell("C19", 0.10, { style: STYLE_PCT })]));
           configRows.push(xmlRow(20, [xmlCell("A20", 4), xmlCell("B20", "Unlimited"),                     xmlCell("C20", 0.15, { style: STYLE_PCT })]));
-          configRows.push(xmlRow(22, [xmlCell("A22", "Partners credit own + associate + paralegal collections (associate fully loaded cost in base target); associates their own only")]));
+          configRows.push(xmlRow(22, [xmlCell("A22", "Partner targets per the 9/28/26 memo (Target col, trued up in Dec); credit = sum of own + associate + paralegal individual collections; associates their own only")]));
           configRows.push(xmlRow(24, [xmlCell("A24", "Paralegal Hours Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(25, [xmlCell("A25", "Min Hours", { style: STYLE_BOLD }), xmlCell("B25", "Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(26, [xmlCell("A26", 110), xmlCell("B26", 100, { style: STYLE_CUR })]));
@@ -3078,6 +3084,7 @@ export function registerDocumentTools(server: McpServer): void {
               { min: 5, max: 5, width: 13 },  // Para Salary
               { min: 6, max: 6, width: 12 },  // Legal Asst
               { min: 7, max: 7, width: 11 },  // Payroll %
+              { min: 8, max: 8, width: 14 },  // Target
             ],
           });
 

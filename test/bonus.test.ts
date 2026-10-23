@@ -124,12 +124,12 @@ describe("reconcileBonusConfig", () => {
   });
 });
 
-describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10)", () => {
-  it("team mapping: PAR←NAF+ACA, KES←SAB,AFL, NRN←TBS+AKG; associates roll up nothing; no JPB row; no MNH split", () => {
+describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10, 9/28/26 memo targets)", () => {
+  it("team mapping: PAR←NAF+ACA, KES←JPB+SAB,AFL, NRN←TBS+AKG; associates roll up nothing; no MNH split", () => {
     const byIni = Object.fromEntries(FIRM_BONUS_ATTORNEYS.map((a) => [a.ini, a]));
     expect(FIRM_BONUS_ATTORNEYS.map((a) => a.ini)).toEqual(["PAR", "KES", "NRN", "NAF", "MNH", "TBS"]);
     expect(byIni.PAR.associate).toBe("NAF");
-    expect(byIni.KES.associate).toBe("");
+    expect(byIni.KES.associate).toBe("JPB"); // his Mar 31–Jul 31 cost is in Paul's KES target
     expect(byIni.NRN.associate).toBe("TBS");
     for (const ini of ["NAF", "MNH", "TBS"]) expect(byIni[ini].associate).toBe("");
     expect(byIni.PAR.paralegal).toBe("ACA");
@@ -138,30 +138,48 @@ describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10)", () => {
     expect(byIni.NAF.paralegal).toBe("");
     expect(byIni.MNH.paralegal).toBe("");
     expect(byIni.TBS.paralegal).toBe("");
-    expect(MNH_SPLIT_AMONG).toEqual([]); // MNH is an associate — her collections are hers alone
+    expect(MNH_SPLIT_AMONG).toEqual([]); // MNH's collections and cost go to no partner
   });
 
-  it("partner credit = own + associate + para col N (no MNH, no JPB); associates own only", () => {
+  it("partner credit = SUM of own + associate + para individual col N (no MNH); associates own only", () => {
     const data = computeBonusData(
       { January: { PAR: 1000, NAF: 500, ACA: 200, SAB: 40, AFL: 60, KES: 700, NRN: 800, AKG: 70, MNH: 300, JPB: 50, TBS: 90 } },
       FIRM_BONUS_ATTORNEYS,
       { firmOverhead: 500000, numAttorneys: 5, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG },
     );
-    expect(data.PAR.rows[0].collections).toBe(1700); // own 1000 + NAF 500 + ACA 200; MNH/JPB excluded
-    expect(data.KES.rows[0].collections).toBe(800);  // own 700 + SAB 40 + AFL 60; JPB tail excluded
+    expect(data.PAR.rows[0].collections).toBe(1700); // own 1000 + NAF 500 + ACA 200; MNH excluded
+    expect(data.KES.rows[0].collections).toBe(850);  // own 700 + JPB 50 + SAB 40 + AFL 60
     expect(data.NRN.rows[0].collections).toBe(960);  // own 800 + TBS 90 + AKG 70
     expect(data.NAF.rows[0].collections).toBe(500);  // own only — unchanged by rolling up to PAR
     expect(data.MNH.rows[0].collections).toBe(300);  // own only — credited to no partner
     expect(data.TBS.rows[0].collections).toBe(90);   // own only — unchanged by rolling up to NRN
   });
 
-  it("base targets follow the cost base: partner = salary + para + 17% on both + overhead/5 + associate fully loaded (salary×1.17 + overhead/5); associate = salary×1.17 + overhead/5", () => {
+  it("partner base targets are the fixed 9/28/26 memo targets; associates keep the salary×1.17 + overhead/5 formula", () => {
     const data = computeBonusData({}, FIRM_BONUS_ATTORNEYS, { firmOverhead: 500000, numAttorneys: 5, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG });
-    expect(data.PAR.baseTarget).toBe(834537.8); // 332340+80000+0.17*412340+100000 + NAF (130000*1.17 + 100000)
-    expect(data.KES.baseTarget).toBe(576587.8); // 332340+75000+0.17*407340+100000 (no associate)
-    expect(data.NRN.baseTarget).toBe(782075);   // 255000+75000+0.17*330000+100000 + TBS (167500*1.17 + 100000)
+    expect(data.PAR.baseTarget).toBe(919899);
+    expect(data.KES.baseTarget).toBe(743161);
+    expect(data.NRN.baseTarget).toBe(845606);
     expect(data.NAF.baseTarget).toBe(252100);   // 130000+0.17*130000+100000
     expect(data.MNH.baseTarget).toBe(228700);
     expect(data.TBS.baseTarget).toBe(295975);
+  });
+});
+
+describe("fixed target", () => {
+  it("a positive target replaces the formula; zero/absent falls back to it", () => {
+    const fixed: BonusAttorney = { ini: "F", salary: 100000, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0, target: 150000 };
+    const formula: BonusAttorney = { ini: "G", salary: 100000, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0, target: 0 };
+    const data = computeBonusData({ January: { F: 160000 } }, [fixed, formula], { firmOverhead: 0, numAttorneys: 1, brackets: BRACKETS, mnhSplitAmong: [] });
+    expect(data.F.baseTarget).toBe(150000);
+    expect(data.F.rows[0].bonusEarned).toBe(500); // 10000 over target @5%
+    expect(data.G.baseTarget).toBe(100000);
+  });
+
+  it("reconcile: a sheet Target edit wins; a blank sheet Target falls back to the code default", () => {
+    const defaults: BonusAttorney[] = [{ ini: "PAR", salary: 1, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0.17, target: 919899 }];
+    const row = (target: number): BonusAttorney => ({ ini: "PAR", salary: 1, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0.17, target });
+    expect(reconcileBonusConfig([row(900000)], defaults).attorneys[0].target).toBe(900000); // December true-up edit honored
+    expect(reconcileBonusConfig([row(0)], defaults).attorneys[0].target).toBe(919899);
   });
 });
