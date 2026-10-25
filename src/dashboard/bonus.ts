@@ -10,38 +10,93 @@ import { MONTH_NAMES_FULL } from "../domain/roster";
 export type BonusAttorney = {
   ini: string; salary: number; associate: string; paralegal: string;
   paraSalary: number; legalAsst: number; payroll: number;
+  // Fixed base target ("Target" column on the Bonus Config sheet). When > 0 it
+  // IS the base target and the salary/overhead formula is not used.
+  target?: number;
 };
 
 // ── The firm's bonus attribution model (single source of truth) ──
 //
-// Attribution follows the COST BASE: an attorney gets bonus credit for the
-// collections of exactly the people whose cost sits in their base target.
-//   - A PARTNER's base target = own salary + paralegal salary + payroll on
-//     both + overhead share → the partner credits own col-N collections plus
-//     their PARALEGAL(s)' collections. NOT their associate's — the associate's
-//     salary is not in the partner's base target.
-//   - An ASSOCIATE's base target = own salary + payroll on it + overhead
-//     share → the associate credits ONLY their own collections.
-// Consequences (firm-confirmed 2026-08):
-//   - The `associate` field is empty for everyone: no associate's collections
-//     roll up to a partner (previously NAF→PAR / JPB-tail→KES).
-//   - JPB (terminated Jul 2026) has no row and credits nobody; his 26 Compare
-//     col-N row remains for firm-total reconciliation only.
-//   - AFL (Anna Lozano, departed) stays in KES's PARALEGAL list so her
-//     ongoing collections keep crediting KES until they stop.
-//   - MNH is an associate, so the old "split MNH's collections among
-//     PAR/KES/NRN" rule is gone (MNH_SPLIT_AMONG is empty).
+// TARGETS — partners use the agreed 2026 team-cost targets from Paul's
+// memo "2026 Partner Bonus: Corrections to How We Measure the Targets"
+// (Sept 28, 2026; accepted at the Oct 20 bonus meeting) and its workbook
+// "2026 Partner Bonus - How It Works and Partner Tabs" (Box: Admin > Practice
+// Growth > Traction > Bonus & Profit Sharing Redevelopment). Each target =
+// actual 2026 pay of the partner + associate + paralegal, a $10,000/associate-FTE
+// planned bonus, actual employer taxes/benefits, and overhead of $831,759
+// (Baker Tilly, 12 mo. to June 2026) ÷ 7.895 fee-earner FTEs = $105,349 per
+// share × shares carried (1 partner + 1 per associate FTE + 0.5 per paralegal
+// FTE). Provisional: trued up in December on actual 2026 overhead — edit the
+// Target column on the Bonus Config sheet; no code change needed.
+//
+// COLLECTIONS — NOT Paul's Rule B (responsible-attorney based). Credit is the
+// SUM OF INDIVIDUAL col-N collections (by WORKING timekeeper, so regardless of
+// whose matter) of exactly the people whose cost sits in the target:
+//   - PAR: own + NAF (associate) + ACA (paralegal) + SKH and JAD (Sara Hebert
+//     and Josh Dunegan, former).
+//   - KES: own + JPB (associate, Mar 31–Jul 31 — his cost is in Paul's KES
+//     target, so his collections, tail included, credit KES) + SAB and AFL
+//     (paralegals; Anna's tail keeps crediting KES until it stops) + EAH, EDS
+//     and LSH (Elizabeth Hagelstein, Elissa Silguero, Lindsey Hebert, former).
+//   - NRN: own + TBS (associate) + AKG (paralegal) + NSJ, ASC and CWW
+//     (Naiymah Jackson, Amy Coli and Christopher Winiecki, former).
+//   - CWW is split by matter (BONUS_MATTER_SPLITS): Chris was Nick's associate
+//     until Oct 2025, then did contract work for Kenny. His collections on
+//     Kenny's matters credit KES (as "CWW@KES"); everything else — his Nick-era
+//     tail and his contract work on Nick's own matters — credits NRN. (Checked
+//     against Jan–Aug 2026: none of his pre-cutover invoices are on Kenny's
+//     matters, so routing by responsible attorney matches the cutover.)
+//   - FORMER STAFF: each partner keeps the tail collections of their own former
+//     staff (listed in the paralegal field), like Anna's. Other former billers
+//     credit no one.
+//   - Associates (NAF, TBS) are unchanged: own collections only, against the
+//     salary + payroll + overhead-share formula. The same dollars count for
+//     the associate and the partner.
+//   - MNH (departing) rolls up to nobody: neither her collections nor her
+//     cost go to any partner (MNH_SPLIT_AMONG is empty).
 export const FIRM_BONUS_ATTORNEYS: BonusAttorney[] = [
-  { ini: "PAR", salary: 332340, associate: "", paralegal: "ACA",     paraSalary: 80000, legalAsst: 0, payroll: 0.17 },
-  { ini: "KES", salary: 332340, associate: "", paralegal: "SAB,AFL", paraSalary: 75000, legalAsst: 0, payroll: 0.17 }, // Stacy (current) + Anna's tail
-  { ini: "NRN", salary: 255000, associate: "", paralegal: "AKG",     paraSalary: 75000, legalAsst: 0, payroll: 0.17 },
+  { ini: "PAR", salary: 332340, associate: "NAF", paralegal: "ACA,SKH,JAD", paraSalary: 80000, legalAsst: 0, payroll: 0.17, target: 919899 },
+  { ini: "KES", salary: 332340, associate: "JPB", paralegal: "SAB,AFL,EAH,EDS,LSH,CWW@KES", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 743161 },
+  { ini: "NRN", salary: 255000, associate: "TBS", paralegal: "AKG,NSJ,ASC,CWW", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 845606 },
   { ini: "NAF", salary: 130000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "MNH", salary: 110000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "TBS", salary: 167500, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
 ];
 
-// No shared-associate split: partners credit own + paralegal collections only.
+// No shared-associate split: MNH's collections and cost go to no partner.
 export const MNH_SPLIT_AMONG: string[] = [];
+
+// Route one timekeeper's collections by RESPONSIBLE ATTORNEY: the part on
+// `responsible`'s matters moves from `ini` to the synthetic key `creditKey`,
+// which that partner lists in their credit fields.
+export type MatterSplit = { ini: string; responsible: string; creditKey: string };
+export const BONUS_MATTER_SPLITS: MatterSplit[] = [
+  { ini: "CWW", responsible: "KES", creditKey: "CWW@KES" },
+];
+
+/**
+ * Apply BONUS_MATTER_SPLITS to per-month col-N collections (returns a copy).
+ * @param amounts monthName -> creditKey -> $ of `ini`'s collections on `responsible`'s matters
+ * The moved amount is capped at what `ini` has that month, so the firm total is unchanged.
+ */
+export function applyMatterSplits(
+  monthCollections: Record<string, Record<string, number>>,
+  splits: MatterSplit[],
+  amounts: Record<string, Record<string, number>>,
+): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const [mn, mc] of Object.entries(monthCollections)) {
+    const row = { ...mc };
+    for (const sp of splits) {
+      const moved = Math.min(Math.max(0, amounts[mn]?.[sp.creditKey] ?? 0), row[sp.ini] ?? 0);
+      if (!moved) continue;
+      row[sp.ini] = round2((row[sp.ini] ?? 0) - moved);
+      row[sp.creditKey] = round2((row[sp.creditKey] ?? 0) + moved);
+    }
+    out[mn] = row;
+  }
+  return out;
+}
 export type BonusBracket = { width: number; rate: number };
 export type BonusRow = {
   month: string; collections: number; ytd: number; bracket: string;
@@ -51,13 +106,25 @@ export type BonusData = Record<string, { baseTarget: number; rows: BonusRow[] }>
 
 // Sum collections for a (possibly multi-initial) associate/paralegal field.
 // Accepts a single initial ("AFL") or a comma/plus/slash list ("SAB,AFL").
+function parseInitials(field: string | undefined): string[] {
+  if (!field) return [];
+  return field.split(/[,+/]/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+}
+
 function sumByInitials(mc: Record<string, number>, field: string | undefined): number {
-  if (!field) return 0;
-  return field
-    .split(/[,+/]/)
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean)
-    .reduce((sum, ini) => sum + (mc[ini] || 0), 0);
+  return parseInitials(field).reduce((sum, ini) => sum + (mc[ini] || 0), 0);
+}
+
+// FULLY LOADED cost of a partner's associate(s): each associate's salary +
+// payroll on it + their overhead share, read from the associate's own config
+// row (so sheet salary edits flow through). A partner earns on an associate's
+// collections only after that associate has covered their full cost.
+// An associate with no bonus row contributes no cost.
+function associateCost(atty: BonusAttorney, all: BonusAttorney[], overheadShare: number): number {
+  return parseInitials(atty.associate).reduce((sum, ini) => {
+    const a = all.find((x) => x.ini.toUpperCase() === ini);
+    return a ? sum + a.salary * (1 + a.payroll) + overheadShare : sum;
+  }, 0);
 }
 
 /**
@@ -70,13 +137,12 @@ function sumByInitials(mc: Record<string, number>, field: string | undefined): n
  * still carried pre-decision mappings (PAR crediting JPB, KES crediting TBS,
  * AFL's tail dropped) and overrode the corrected defaults on every run. The
  * current model lives in FIRM_BONUS_ATTORNEYS: partners credit own +
- * paralegal collections only (no associate credit), associates credit their
- * own only.
+ * associate + paralegal collections, associates credit their own only.
  *
  * RULES:
  * - The ROSTER (which attorneys have bonus rows) and the ATTRIBUTION fields
  *   (associate / paralegal credit lists) come from the code defaults.
- * - The COMP numbers (salary, paraSalary, legalAsst, payroll) stay
+ * - The COMP numbers (salary, paraSalary, legalAsst, payroll, target) stay
  *   sheet-editable: a positive sheet value wins over the default; blank/zero
  *   falls back to the default (so a half-filled row can't zero out a salary).
  * - Sheet rows for attorneys not in the defaults are dropped (e.g. JPB's
@@ -107,6 +173,7 @@ export function reconcileBonusConfig(
       paraSalary: s.paraSalary > 0 ? s.paraSalary : def.paraSalary,
       legalAsst: s.legalAsst > 0 ? s.legalAsst : def.legalAsst,
       payroll: s.payroll > 0 ? s.payroll : def.payroll,
+      target: (s.target ?? 0) > 0 ? s.target : def.target,
     };
   });
   const dropped = sheetRows.filter((r) => !defaults.some((d) => d.ini.toUpperCase() === r.ini.toUpperCase()));
@@ -132,7 +199,10 @@ export function computeBonusData(
   const bonusData: BonusData = {};
 
   for (const atty of configAttorneys) {
-    const baseTarget = atty.salary + atty.paraSalary + atty.legalAsst + (atty.payroll * (atty.salary + atty.paraSalary)) + overheadShare;
+    const baseTarget = (atty.target ?? 0) > 0
+      ? atty.target!
+      : atty.salary + atty.paraSalary + atty.legalAsst + (atty.payroll * (atty.salary + atty.paraSalary))
+        + associateCost(atty, configAttorneys, overheadShare) + overheadShare;
     const bracketCeilings = [baseTarget, baseTarget + brackets[1].width, baseTarget + brackets[1].width + brackets[2].width];
     const rows: BonusRow[] = [];
     let ytd = 0;
