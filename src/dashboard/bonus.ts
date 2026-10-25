@@ -32,13 +32,14 @@ export type BonusAttorney = {
 // COLLECTIONS — NOT Paul's Rule B (responsible-attorney based). Credit is the
 // SUM OF INDIVIDUAL col-N collections (by WORKING timekeeper, so regardless of
 // whose matter) of exactly the people whose cost sits in the target:
-//   - PAR: own + NAF (associate) + ACA (paralegal) + SKH (Sara Hebert, former).
+//   - PAR: own + NAF (associate) + ACA (paralegal) + SKH and JAD (Sara Hebert
+//     and Josh Dunegan, former).
 //   - KES: own + JPB (associate, Mar 31–Jul 31 — his cost is in Paul's KES
 //     target, so his collections, tail included, credit KES) + SAB and AFL
 //     (paralegals; Anna's tail keeps crediting KES until it stops) + EAH
 //     (Elizabeth Hagelstein, former).
-//   - NRN: own + TBS (associate) + AKG (paralegal) + NSJ and ASC (Naiymah
-//     Jackson and Amy Coli, former).
+//   - NRN: own + TBS (associate) + AKG (paralegal) + NSJ, ASC and CWW
+//     (Naiymah Jackson, Amy Coli and Christopher Winiecki, former).
 //   - FORMER STAFF: each partner keeps the tail collections of their own former
 //     staff (listed in the paralegal field), like Anna's. Other former billers
 //     credit no one.
@@ -48,9 +49,9 @@ export type BonusAttorney = {
 //   - MNH (departing) rolls up to nobody: neither her collections nor her
 //     cost go to any partner (MNH_SPLIT_AMONG is empty).
 export const FIRM_BONUS_ATTORNEYS: BonusAttorney[] = [
-  { ini: "PAR", salary: 332340, associate: "NAF", paralegal: "ACA,SKH",     paraSalary: 80000, legalAsst: 0, payroll: 0.17, target: 919899 },
+  { ini: "PAR", salary: 332340, associate: "NAF", paralegal: "ACA,SKH,JAD", paraSalary: 80000, legalAsst: 0, payroll: 0.17, target: 919899 },
   { ini: "KES", salary: 332340, associate: "JPB", paralegal: "SAB,AFL,EAH", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 743161 },
-  { ini: "NRN", salary: 255000, associate: "TBS", paralegal: "AKG,NSJ,ASC", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 845606 },
+  { ini: "NRN", salary: 255000, associate: "TBS", paralegal: "AKG,NSJ,ASC,CWW", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 845606 },
   { ini: "NAF", salary: 130000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "MNH", salary: 110000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "TBS", salary: 167500, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
