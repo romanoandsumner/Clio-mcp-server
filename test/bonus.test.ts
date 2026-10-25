@@ -125,16 +125,16 @@ describe("reconcileBonusConfig", () => {
 });
 
 describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10, 9/28/26 memo targets)", () => {
-  it("team mapping: PAR←NAF+ACA, KES←JPB+SAB,AFL, NRN←TBS+AKG; associates roll up nothing; no MNH split", () => {
+  it("team mapping: PAR←NAF+ACA+SKH, KES←JPB+SAB,AFL,EAH, NRN←TBS+AKG,NSJ,ASC; associates roll up nothing; no MNH split", () => {
     const byIni = Object.fromEntries(FIRM_BONUS_ATTORNEYS.map((a) => [a.ini, a]));
     expect(FIRM_BONUS_ATTORNEYS.map((a) => a.ini)).toEqual(["PAR", "KES", "NRN", "NAF", "MNH", "TBS"]);
     expect(byIni.PAR.associate).toBe("NAF");
     expect(byIni.KES.associate).toBe("JPB"); // his Mar 31–Jul 31 cost is in Paul's KES target
     expect(byIni.NRN.associate).toBe("TBS");
     for (const ini of ["NAF", "MNH", "TBS"]) expect(byIni[ini].associate).toBe("");
-    expect(byIni.PAR.paralegal).toBe("ACA");
-    expect(byIni.KES.paralegal).toBe("SAB,AFL"); // Anna's tail keeps crediting KES until it stops
-    expect(byIni.NRN.paralegal).toBe("AKG");
+    expect(byIni.PAR.paralegal).toBe("ACA,SKH");     // + Sara Hebert's tail
+    expect(byIni.KES.paralegal).toBe("SAB,AFL,EAH"); // + Anna's and Elizabeth Hagelstein's tails
+    expect(byIni.NRN.paralegal).toBe("AKG,NSJ,ASC"); // + Naiymah Jackson's and Amy Coli's tails
     expect(byIni.NAF.paralegal).toBe("");
     expect(byIni.MNH.paralegal).toBe("");
     expect(byIni.TBS.paralegal).toBe("");
@@ -143,13 +143,13 @@ describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10, 9/28/26 memo ta
 
   it("partner credit = SUM of own + associate + para individual col N (no MNH); associates own only", () => {
     const data = computeBonusData(
-      { January: { PAR: 1000, NAF: 500, ACA: 200, SAB: 40, AFL: 60, KES: 700, NRN: 800, AKG: 70, MNH: 300, JPB: 50, TBS: 90 } },
+      { January: { PAR: 1000, NAF: 500, ACA: 200, SKH: 5, SAB: 40, AFL: 60, EAH: 7, KES: 700, NRN: 800, AKG: 70, NSJ: 3, ASC: 4, MNH: 300, JPB: 50, TBS: 90, RT: 1000 } },
       FIRM_BONUS_ATTORNEYS,
       { firmOverhead: 500000, numAttorneys: 5, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG },
     );
-    expect(data.PAR.rows[0].collections).toBe(1700); // own 1000 + NAF 500 + ACA 200; MNH excluded
-    expect(data.KES.rows[0].collections).toBe(850);  // own 700 + JPB 50 + SAB 40 + AFL 60
-    expect(data.NRN.rows[0].collections).toBe(960);  // own 800 + TBS 90 + AKG 70
+    expect(data.PAR.rows[0].collections).toBe(1705); // own 1000 + NAF 500 + ACA 200 + SKH 5; MNH and RT (no team) excluded
+    expect(data.KES.rows[0].collections).toBe(857);  // own 700 + JPB 50 + SAB 40 + AFL 60 + EAH 7
+    expect(data.NRN.rows[0].collections).toBe(967);  // own 800 + TBS 90 + AKG 70 + NSJ 3 + ASC 4
     expect(data.NAF.rows[0].collections).toBe(500);  // own only — unchanged by rolling up to PAR
     expect(data.MNH.rows[0].collections).toBe(300);  // own only — credited to no partner
     expect(data.TBS.rows[0].collections).toBe(90);   // own only — unchanged by rolling up to NRN
