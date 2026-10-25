@@ -2089,7 +2089,7 @@ export function registerDocumentTools(server: McpServer): void {
           // partner targets are the fixed team-cost targets from the 9/28/26
           // memo (sheet "Target" column); partners credit the SUM of own +
           // associate + paralegal individual (col N) collections; associates
-          // credit their own only. PAR←NAF+ACA+SKH+JAD, KES←JPB+SAB+AFL+EAH,
+          // credit their own only. PAR←NAF+ACA+SKH+JAD, KES←JPB+SAB+AFL+EAH+EDS+LSH,
           // NRN←TBS+AKG+NSJ+ASC+CWW (former staff tails credit their old partner);
           // MNH rolls up to nobody.
           const BONUS_ATTORNEYS = FIRM_BONUS_ATTORNEYS;
