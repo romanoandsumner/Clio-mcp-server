@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 import { buildRevenueByMonth } from "../dashboard/revenue";
-import { computeBonusData, reconcileBonusConfig, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG } from "../dashboard/bonus";
+import { computeBonusData, reconcileBonusConfig, applyMatterSplits, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG, BONUS_MATTER_SPLITS } from "../dashboard/bonus";
 import { buildNonbillableByMonth } from "../dashboard/nonbillable";
 import { buildMonthlyCollections } from "../dashboard/collections";
 import { buildMonthlyBilled } from "../dashboard/billed";
@@ -2026,7 +2026,7 @@ export function registerDocumentTools(server: McpServer): void {
             indivByMonth: indivCollByMonth, origByMonth: origCollByMonth,
             respByMonth: respCollByMonth,
             nonRosterIndivByMonth: nrbIndivByMonth, nonRosterOrigByMonth: nrbOrigByMonth,
-            nonRosterRespByMonth: nrbRespByMonth,
+            nonRosterRespByMonth: nrbRespByMonth, indivRespByMonth: indivRespCollByMonth,
             firmByMonth: collFirmFeesByMonth, firmYtd: collFirmYtd,
           } = await buildMonthlyCollections(params.year, params.month, COLL_ROSTER, { months: collMonths });
           console.log(`[Dashboard] FEES-ONLY collections built: firm YTD fees received=$${collFirmYtd.toFixed(2)} (Billed Time Collected; excludes expenses/interest/tax)`);
@@ -2090,7 +2090,7 @@ export function registerDocumentTools(server: McpServer): void {
           // memo (sheet "Target" column); partners credit the SUM of own +
           // associate + paralegal individual (col N) collections; associates
           // credit their own only. PAR←NAF+ACA+SKH+JAD, KES←JPB+SAB+AFL+EAH+EDS+LSH,
-          // NRN←TBS+AKG+NSJ+ASC+CWW (former staff tails credit their old partner);
+          // NRN←TBS+AKG+NSJ+ASC+CWW (CWW on Kenny's matters → KES) (former staff tails credit their old partner);
           // MNH rolls up to nobody.
           const BONUS_ATTORNEYS = FIRM_BONUS_ATTORNEYS;
           const FIRM_OVERHEAD = 500000;
@@ -2189,8 +2189,23 @@ export function registerDocumentTools(server: McpServer): void {
             }
           }
 
+          // Route split timekeepers by matter (BONUS_MATTER_SPLITS, e.g. Chris's
+          // contract work on Kenny's matters → KES), from this run's per-responsible
+          // fee breakdown (every YTD month is rebuilt each run).
+          const splitAmounts: Record<string, Record<string, number>> = {};
+          for (const sp of BONUS_MATTER_SPLITS) {
+            const uid = COLL_ROSTER.find((r) => r.initials === sp.ini)?.user_id;
+            const rid = COLL_ROSTER.find((r) => r.initials === sp.responsible)?.user_id;
+            if (uid == null || rid == null) continue;
+            for (const [m, byUser] of Object.entries(indivRespCollByMonth)) {
+              const amt = byUser[uid]?.[rid] ?? 0;
+              if (amt) (splitAmounts[monthNames[Number(m) - 1]] ??= {})[sp.creditKey] = amt;
+            }
+          }
+          const bonusCollections = applyMatterSplits(monthCollections, BONUS_MATTER_SPLITS, splitAmounts);
+
           // Per-attorney bonus math — pure, extracted to src/dashboard/bonus.ts (unit-tested).
-          const bonusData = computeBonusData(monthCollections, configAttorneys, {
+          const bonusData = computeBonusData(bonusCollections, configAttorneys, {
             firmOverhead, numAttorneys, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG,
           });
 

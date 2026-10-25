@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeBonusData, reconcileBonusConfig, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG, type BonusBracket, type BonusAttorney } from "../src/dashboard/bonus";
+import { computeBonusData, reconcileBonusConfig, applyMatterSplits, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG, BONUS_MATTER_SPLITS, type BonusBracket, type BonusAttorney } from "../src/dashboard/bonus";
 
 const BRACKETS: BonusBracket[] = [
   { width: 0, rate: 0 },           // base target at 0%
@@ -133,7 +133,7 @@ describe("FIRM_BONUS_ATTORNEYS (firm comp model pin — 2026-10, 9/28/26 memo ta
     expect(byIni.NRN.associate).toBe("TBS");
     for (const ini of ["NAF", "MNH", "TBS"]) expect(byIni[ini].associate).toBe("");
     expect(byIni.PAR.paralegal).toBe("ACA,SKH,JAD"); // + Sara Hebert's and Josh Dunegan's tails
-    expect(byIni.KES.paralegal).toBe("SAB,AFL,EAH,EDS,LSH"); // + Anna's, Elizabeth Hagelstein's, Elissa Silguero's and Lindsey Hebert's tails
+    expect(byIni.KES.paralegal).toBe("SAB,AFL,EAH,EDS,LSH,CWW@KES"); // + Anna's, Elizabeth Hagelstein's, Elissa Silguero's and Lindsey Hebert's tails
     expect(byIni.NRN.paralegal).toBe("AKG,NSJ,ASC,CWW"); // + Naiymah Jackson's, Amy Coli's and Christopher Winiecki's tails
     expect(byIni.NAF.paralegal).toBe("");
     expect(byIni.MNH.paralegal).toBe("");
@@ -181,5 +181,30 @@ describe("fixed target", () => {
     const row = (target: number): BonusAttorney => ({ ini: "PAR", salary: 1, associate: "", paralegal: "", paraSalary: 0, legalAsst: 0, payroll: 0.17, target });
     expect(reconcileBonusConfig([row(900000)], defaults).attorneys[0].target).toBe(900000); // December true-up edit honored
     expect(reconcileBonusConfig([row(0)], defaults).attorneys[0].target).toBe(919899);
+  });
+});
+
+describe("matter splits (Chris Winiecki: Nick's until Oct 2025, then contract work for Kenny)", () => {
+  it("CWW on Kenny's matters credits KES; the rest of CWW credits NRN; firm total unchanged", () => {
+    expect(BONUS_MATTER_SPLITS).toEqual([{ ini: "CWW", responsible: "KES", creditKey: "CWW@KES" }]);
+    const mc = applyMatterSplits(
+      { January: { KES: 700, NRN: 800, CWW: 1000 } },
+      BONUS_MATTER_SPLITS,
+      { January: { "CWW@KES": 300 } },
+    );
+    expect(mc.January).toEqual({ KES: 700, NRN: 800, CWW: 700, "CWW@KES": 300 });
+    const data = computeBonusData(mc, FIRM_BONUS_ATTORNEYS, { firmOverhead: 500000, numAttorneys: 5, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG });
+    expect(data.KES.rows[0].collections).toBe(1000); // own 700 + CWW on Kenny's matters 300
+    expect(data.NRN.rows[0].collections).toBe(1500); // own 800 + rest of CWW 700
+  });
+
+  it("caps the moved amount at the timekeeper's col-N figure and leaves months without splits alone", () => {
+    const mc = applyMatterSplits(
+      { January: { CWW: 100 }, February: { CWW: 50 } },
+      BONUS_MATTER_SPLITS,
+      { January: { "CWW@KES": 250 } },
+    );
+    expect(mc.January).toEqual({ CWW: 0, "CWW@KES": 100 });
+    expect(mc.February).toEqual({ CWW: 50 });
   });
 });

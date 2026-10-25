@@ -19,6 +19,10 @@ export type MonthlyCollections = {
   nonRosterOrigByMonth: Record<number, number>;
   // month -> collected fees $ whose responsible attorney is NOT on the roster (→ the "NRB" line, col S)
   nonRosterRespByMonth: Record<number, number>;
+  // month -> working-timekeeper user_id -> responsible-attorney user_id (0 = not on
+  // the roster) -> collected fees $. Lets the bonus route one person's collections
+  // by matter (see BONUS_MATTER_SPLITS in bonus.ts).
+  indivRespByMonth: Record<number, Record<number, Record<number, number>>>;
   // month -> firm-wide collected fees $ (reconciliation target: Σ col N == Σ col S == Σ col V == this)
   firmByMonth: Record<number, number>;
   // firm-wide YTD total collected fees (reconciliation signal)
@@ -34,6 +38,7 @@ export type MonthFeeAgg = {
   nonRosterIndiv: number;               // fees by non-roster working timekeepers (→ NRB col N)
   nonRosterOrig: number;                // fees originated by non-roster attorneys (→ NRB col V)
   nonRosterResp: number;                // fees under non-roster responsible attorneys (→ NRB col S)
+  indivResp: Record<number, Record<number, number>>; // working timekeeper → responsible attorney (0 = non-roster) → fees
   firm: number;                         // firm-wide fees collected (Σ indiv+NRB == Σ orig+NRB == Σ resp+NRB == this)
 };
 
@@ -45,7 +50,7 @@ export type MonthFeeAgg = {
  * Σ col N (+NRB) == Σ col V (+NRB) == Σ col S (+NRB) == firm fees.
  */
 export function aggregateMonthFees(rows: Record<string, string>[], roster: RosterMember[]): MonthFeeAgg {
-  const agg: MonthFeeAgg = { indiv: {}, orig: {}, resp: {}, nonRosterIndiv: 0, nonRosterOrig: 0, nonRosterResp: 0, firm: 0 };
+  const agg: MonthFeeAgg = { indiv: {}, orig: {}, resp: {}, nonRosterIndiv: 0, nonRosterOrig: 0, nonRosterResp: 0, indivResp: {}, firm: 0 };
   for (const r of rows) {
     const collected = collNum(r["Billed Time Collected"]);
     if (!collected) continue;
@@ -59,6 +64,10 @@ export function aggregateMonthFees(rows: Record<string, string>[], roster: Roste
     const rid = matchRosterResponsible(r["Responsible Attorney"] || "", roster);
     if (rid != null) agg.resp[rid] = (agg.resp[rid] ?? 0) + collected;
     else agg.nonRosterResp += collected;
+    if (uid != null) {
+      const byResp = (agg.indivResp[uid] ??= {});
+      byResp[rid ?? 0] = (byResp[rid ?? 0] ?? 0) + collected;
+    }
   }
   return agg;
 }
@@ -91,6 +100,7 @@ export async function buildMonthlyCollections(
   const nonRosterIndivByMonth: Record<number, number> = {};
   const nonRosterOrigByMonth: Record<number, number> = {};
   const nonRosterRespByMonth: Record<number, number> = {};
+  const indivRespByMonth: Record<number, Record<number, Record<number, number>>> = {};
   const firmByMonth: Record<number, number> = {};
   let firmYtd = 0;
   for (const m of months) {
@@ -101,11 +111,12 @@ export async function buildMonthlyCollections(
     if (Object.keys(agg.indiv).length) indivByMonth[m] = agg.indiv;
     if (Object.keys(agg.orig).length) origByMonth[m] = agg.orig;
     if (Object.keys(agg.resp).length) respByMonth[m] = agg.resp;
+    if (Object.keys(agg.indivResp).length) indivRespByMonth[m] = agg.indivResp;
     nonRosterIndivByMonth[m] = agg.nonRosterIndiv;
     nonRosterOrigByMonth[m] = agg.nonRosterOrig;
     nonRosterRespByMonth[m] = agg.nonRosterResp;
     firmByMonth[m] = agg.firm;
     firmYtd += agg.firm;
   }
-  return { indivByMonth, origByMonth, respByMonth, nonRosterIndivByMonth, nonRosterOrigByMonth, nonRosterRespByMonth, firmByMonth, firmYtd };
+  return { indivByMonth, origByMonth, respByMonth, nonRosterIndivByMonth, nonRosterOrigByMonth, nonRosterRespByMonth, indivRespByMonth, firmByMonth, firmYtd };
 }

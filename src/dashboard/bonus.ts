@@ -40,6 +40,12 @@ export type BonusAttorney = {
 //     and LSH (Elizabeth Hagelstein, Elissa Silguero, Lindsey Hebert, former).
 //   - NRN: own + TBS (associate) + AKG (paralegal) + NSJ, ASC and CWW
 //     (Naiymah Jackson, Amy Coli and Christopher Winiecki, former).
+//   - CWW is split by matter (BONUS_MATTER_SPLITS): Chris was Nick's associate
+//     until Oct 2025, then did contract work for Kenny. His collections on
+//     Kenny's matters credit KES (as "CWW@KES"); everything else — his Nick-era
+//     tail and his contract work on Nick's own matters — credits NRN. (Checked
+//     against Jan–Aug 2026: none of his pre-cutover invoices are on Kenny's
+//     matters, so routing by responsible attorney matches the cutover.)
 //   - FORMER STAFF: each partner keeps the tail collections of their own former
 //     staff (listed in the paralegal field), like Anna's. Other former billers
 //     credit no one.
@@ -50,7 +56,7 @@ export type BonusAttorney = {
 //     cost go to any partner (MNH_SPLIT_AMONG is empty).
 export const FIRM_BONUS_ATTORNEYS: BonusAttorney[] = [
   { ini: "PAR", salary: 332340, associate: "NAF", paralegal: "ACA,SKH,JAD", paraSalary: 80000, legalAsst: 0, payroll: 0.17, target: 919899 },
-  { ini: "KES", salary: 332340, associate: "JPB", paralegal: "SAB,AFL,EAH,EDS,LSH", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 743161 },
+  { ini: "KES", salary: 332340, associate: "JPB", paralegal: "SAB,AFL,EAH,EDS,LSH,CWW@KES", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 743161 },
   { ini: "NRN", salary: 255000, associate: "TBS", paralegal: "AKG,NSJ,ASC,CWW", paraSalary: 75000, legalAsst: 0, payroll: 0.17, target: 845606 },
   { ini: "NAF", salary: 130000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
   { ini: "MNH", salary: 110000, associate: "", paralegal: "",        paraSalary: 0,     legalAsst: 0, payroll: 0.17 },
@@ -59,6 +65,38 @@ export const FIRM_BONUS_ATTORNEYS: BonusAttorney[] = [
 
 // No shared-associate split: MNH's collections and cost go to no partner.
 export const MNH_SPLIT_AMONG: string[] = [];
+
+// Route one timekeeper's collections by RESPONSIBLE ATTORNEY: the part on
+// `responsible`'s matters moves from `ini` to the synthetic key `creditKey`,
+// which that partner lists in their credit fields.
+export type MatterSplit = { ini: string; responsible: string; creditKey: string };
+export const BONUS_MATTER_SPLITS: MatterSplit[] = [
+  { ini: "CWW", responsible: "KES", creditKey: "CWW@KES" },
+];
+
+/**
+ * Apply BONUS_MATTER_SPLITS to per-month col-N collections (returns a copy).
+ * @param amounts monthName -> creditKey -> $ of `ini`'s collections on `responsible`'s matters
+ * The moved amount is capped at what `ini` has that month, so the firm total is unchanged.
+ */
+export function applyMatterSplits(
+  monthCollections: Record<string, Record<string, number>>,
+  splits: MatterSplit[],
+  amounts: Record<string, Record<string, number>>,
+): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const [mn, mc] of Object.entries(monthCollections)) {
+    const row = { ...mc };
+    for (const sp of splits) {
+      const moved = Math.min(Math.max(0, amounts[mn]?.[sp.creditKey] ?? 0), row[sp.ini] ?? 0);
+      if (!moved) continue;
+      row[sp.ini] = round2((row[sp.ini] ?? 0) - moved);
+      row[sp.creditKey] = round2((row[sp.creditKey] ?? 0) + moved);
+    }
+    out[mn] = row;
+  }
+  return out;
+}
 export type BonusBracket = { width: number; rate: number };
 export type BonusRow = {
   month: string; collections: number; ytd: number; bracket: string;
