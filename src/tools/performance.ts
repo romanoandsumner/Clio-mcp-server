@@ -2,6 +2,7 @@ import { z } from "zod/v4";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { fetchAllPages, downloadReport, rawPostSingle, rawGetSingle } from "../clio/pagination";
 import { getFeeAllocationCSV, genFeeAllocationByMonth, assertReportPeriod, parseCSV } from "../clio/reportCsv";
+import { withBackgroundFallback } from "../utils/jobs";
 
 const TIME_FIELDS =
   "id,date,quantity,rounded_quantity,price,total,note,billed,matter{id,display_number,description},user{id,name}";
@@ -763,7 +764,7 @@ export function registerPerformanceTools(server: McpServer): void {
   // get_fee_allocation
   server.tool(
     "get_fee_allocation",
-    "USE FOR: who gets credit for money collected (or billed) in a date range, per timekeeper, from Clio's own Fee Allocation Report. Generates a report for exactly start_date..end_date: basis='payment' (default) = money received in the window; basis='issue' = time on invoices issued in the window. Pass report_id instead to read an existing report as-is (its own period is reported). Optional user_name filter. For one month use get_monthly_fee_allocation; for per-invoice rows use get_fee_allocation_detail; for roll-up by responsible attorney use get_responsible_collections; for what one client paid use get_payments.",
+    "USE FOR: who gets credit for money collected (or billed) in a date range, per timekeeper, from Clio's own Fee Allocation Report. Generates a report for exactly start_date..end_date: basis='payment' (default) = money received in the window; basis='issue' = time on invoices issued in the window. Pass report_id instead to read an existing report as-is (its own period is reported). Optional user_name filter. For one month use get_monthly_fee_allocation; for per-invoice rows use get_fee_allocation_detail; for roll-up by responsible attorney use get_responsible_collections; for what one client paid use get_payments. If the Clio report takes longer than ~45s, the call returns a job_id instead of timing out; poll get_dashboard_status with it for the full result.",
     {
       start_date: z.string().optional().describe("Start of the window (YYYY-MM-DD). Required unless report_id is given."),
       end_date: z.string().optional().describe("End of the window (YYYY-MM-DD). Required unless report_id is given."),
@@ -771,7 +772,7 @@ export function registerPerformanceTools(server: McpServer): void {
       user_name: z.string().optional().describe("Filter by timekeeper name (partial match)"),
       report_id: z.coerce.number().optional().describe("Read this existing report (from list_fee_allocation_reports) instead of generating one; dates are then ignored."),
     },
-    async (params) => {
+    withBackgroundFallback("feealloc", async (params) => {
       try {
         const { rows, source } = await loadFeeAllocationRows(params);
 
@@ -859,7 +860,7 @@ export function registerPerformanceTools(server: McpServer): void {
           isError: true,
         };
       }
-    }
+    })
   );
 
   // get_monthly_fee_allocation
@@ -870,14 +871,14 @@ export function registerPerformanceTools(server: McpServer): void {
   // the dashboard uses for its collections/billed columns.
   server.tool(
     "get_monthly_fee_allocation",
-    "Per-month Fee Allocation by timekeeper from a FRESHLY GENERATED report scoped to ONE calendar month (for an arbitrary date range use get_fee_allocation, which now generates a report for exactly that window). basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Returns per-timekeeper collected, billed $, and billed hours.",
+    "Per-month Fee Allocation by timekeeper from a FRESHLY GENERATED report scoped to ONE calendar month (for an arbitrary date range use get_fee_allocation, which now generates a report for exactly that window). basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Returns per-timekeeper collected, billed $, and billed hours. If the Clio report takes longer than ~45s, the call returns a job_id instead of timing out; poll get_dashboard_status with it for the full result.",
     {
       year: z.coerce.number().describe("Year, e.g. 2026"),
       month: z.coerce.number().describe("Month, 1-12"),
       basis: z.enum(["payment", "issue"]).optional().default("payment").describe("payment = received that month; issue = billed on invoices issued that month"),
       user_name: z.string().optional().describe("Filter to a timekeeper by partial name match"),
     },
-    async (params) => {
+    withBackgroundFallback("feealloc_month", async (params) => {
       try {
         const rows = await genFeeAllocationByMonth(params.year, params.month, { filterByPayment: params.basis !== "issue" });
         const filtered = params.user_name
@@ -924,7 +925,7 @@ export function registerPerformanceTools(server: McpServer): void {
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: true, message: err.message, status: err.response?.status, clio_error: err.response?.data }) }], isError: true };
       }
-    }
+    })
   );
 
   // get_fee_allocation_detail
@@ -940,14 +941,14 @@ export function registerPerformanceTools(server: McpServer): void {
   // numeric columns so a reconciliation total is available without re-summing.
   server.tool(
     "get_fee_allocation_detail",
-    "Row-level Fee Allocation Report for ONE month — the per-invoice detail behind get_monthly_fee_allocation (which only returns per-timekeeper totals). Each row is one timekeeper's allocation on one invoice, returned VERBATIM with every CSV column (invoice number, matter, User, Responsible/Originating Attorney, Billed Hours, Billed Time, Billed Time Collected, Total Funds Collected, Issue Date). Use this to reconcile the report line-by-line against an external file and find which invoices are missing or off. basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Optionally filter to one timekeeper by partial name match.",
+    "Row-level Fee Allocation Report for ONE month — the per-invoice detail behind get_monthly_fee_allocation (which only returns per-timekeeper totals). Each row is one timekeeper's allocation on one invoice, returned VERBATIM with every CSV column (invoice number, matter, User, Responsible/Originating Attorney, Billed Hours, Billed Time, Billed Time Collected, Total Funds Collected, Issue Date). Use this to reconcile the report line-by-line against an external file and find which invoices are missing or off. basis='payment' (default) = money RECEIVED that month (payment date); basis='issue' = time BILLED on invoices issued that month (issue date). Optionally filter to one timekeeper by partial name match. If the Clio report takes longer than ~45s, the call returns a job_id instead of timing out; poll get_dashboard_status with it for the full result.",
     {
       year: z.coerce.number().describe("Year, e.g. 2026"),
       month: z.coerce.number().describe("Month, 1-12"),
       basis: z.enum(["payment", "issue"]).optional().default("payment").describe("payment = received that month; issue = billed on invoices issued that month"),
       user_name: z.string().optional().describe("Filter to a timekeeper by partial name match (matches the report's 'User' column)"),
     },
-    async (params) => {
+    withBackgroundFallback("feealloc_detail", async (params) => {
       try {
         const rows = await genFeeAllocationByMonth(params.year, params.month, { filterByPayment: params.basis !== "issue" });
         const filtered = params.user_name
@@ -986,7 +987,7 @@ export function registerPerformanceTools(server: McpServer): void {
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: true, message: err.message, status: err.response?.status, clio_error: err.response?.data }) }], isError: true };
       }
-    }
+    })
   );
 
   // get_monthly_revenue
@@ -996,13 +997,13 @@ export function registerPerformanceTools(server: McpServer): void {
   // amount is a credit note / write-off vs a line-level discount).
   server.tool(
     "get_monthly_revenue",
-    "Per-month classic Revenue Report for ONE timekeeper: billed $, billable hours, write-offs (Credit Notes) and line discounts (Discounted Time). This is the source of the dashboard's Write-offs (col L) and Discounts (col M). Use to reconcile a write-off divergence (credit-note vs line-discount classification). Scoped to a single user to stay fast.",
+    "Per-month classic Revenue Report for ONE timekeeper: billed $, billable hours, write-offs (Credit Notes) and line discounts (Discounted Time). This is the source of the dashboard's Write-offs (col L) and Discounts (col M). Use to reconcile a write-off divergence (credit-note vs line-discount classification). Scoped to a single user to stay fast. If the Clio report takes longer than ~45s, the call returns a job_id instead of timing out; poll get_dashboard_status with it for the full result.",
     {
       year: z.coerce.number().describe("Year, e.g. 2026"),
       month: z.coerce.number().describe("Month, 1-12"),
       user_id: z.coerce.number().describe("Timekeeper user ID (required)"),
     },
-    async (params) => {
+    withBackgroundFallback("revenue_month", async (params) => {
       try {
         const monthStart = `${params.year}-${String(params.month).padStart(2, "0")}-01`;
         const endDay = new Date(params.year, params.month, 0).getDate();
@@ -1054,13 +1055,13 @@ export function registerPerformanceTools(server: McpServer): void {
       } catch (err: any) {
         return { content: [{ type: "text" as const, text: JSON.stringify({ error: true, message: err.message, status: err.response?.status, clio_error: err.response?.data }) }], isError: true };
       }
-    }
+    })
   );
 
   // get_responsible_collections
   server.tool(
     "get_responsible_collections",
-    "USE FOR: money collected in a date range rolled up to the responsible attorney on each matter, with the timekeepers under each. Generates a Fee Allocation Report for exactly start_date..end_date on a payment-date basis (money received in the window); pass report_id instead to read an existing report as-is. The monthly breakdown buckets by invoice ISSUE date, as the report rows carry no payment date. For per-timekeeper credit use get_fee_allocation.",
+    "USE FOR: money collected in a date range rolled up to the responsible attorney on each matter, with the timekeepers under each. Generates a Fee Allocation Report for exactly start_date..end_date on a payment-date basis (money received in the window); pass report_id instead to read an existing report as-is. The monthly breakdown buckets by invoice ISSUE date, as the report rows carry no payment date. For per-timekeeper credit use get_fee_allocation. If the Clio report takes longer than ~45s, the call returns a job_id instead of timing out; poll get_dashboard_status with it for the full result.",
     {
       start_date: z.string().optional().describe("Start of the window (YYYY-MM-DD). Required unless report_id is given."),
       end_date: z.string().optional().describe("End of the window (YYYY-MM-DD). Required unless report_id is given."),
@@ -1071,7 +1072,7 @@ export function registerPerformanceTools(server: McpServer): void {
         .default("none")
         .describe("Break results into monthly periods"),
     },
-    async (params) => {
+    withBackgroundFallback("resp_coll", async (params) => {
       try {
         const { rows, source } = await loadFeeAllocationRows(params);
         const filtered = rows;
@@ -1151,6 +1152,6 @@ export function registerPerformanceTools(server: McpServer): void {
           isError: true,
         };
       }
-    }
+    })
   );
 }
