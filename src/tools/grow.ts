@@ -172,14 +172,17 @@ export function readTokenScopes(token: string | undefined): string[] | null {
 export const GROW_LEAD_INBOX_ALL_READ = "grow_lead_inbox_all_read";
 
 /**
- * One-line reauthorization nudge for the lead-inbox-all scope. Added 2026-09:
- * without it, inbox leads submitted by other apps come back with
- * `inbox_lead_id` in `redacted_fields` rather than erroring, so the gap is
- * invisible. Surfaced whenever the scope is requested but the stored token
- * either lacks it or is opaque (can't be checked).
+ * One-line reauthorization nudge for the lead-inbox-all scope. Since Clio's
+ * 2026-10-21 enforcement release, a token with only grow_lead_inbox_read sees
+ * ONLY the leads this app submitted: GET /inbox_leads silently omits every
+ * other lead (firm website form, Grow-entered, other apps) and
+ * GET /inbox_leads/{id} returns 404 for them. inbox_lead_id on matters and
+ * contacts from those leads also comes back null + listed in redacted_fields.
+ * None of it errors, so the gap is invisible. Surfaced whenever the scope is
+ * requested but the stored token either lacks it or is opaque (can't be checked).
  */
-const LEAD_INBOX_ALL_REAUTH_NOTE =
-  `Reauthorize at /grow/oauth/start — the stored token is missing ${GROW_LEAD_INBOX_ALL_READ}, so inbox leads submitted by other applications return with inbox_lead_id in redacted_fields instead of populated.`;
+export const LEAD_INBOX_ALL_REAUTH_NOTE =
+  `Reauthorize at /grow/oauth/start — the stored token may be missing ${GROW_LEAD_INBOX_ALL_READ}. Without it Grow returns only the inbox leads THIS app submitted: lead lists and counts silently omit firm-website, Grow-entered and other-app leads, fetching one of those by ID returns 404, and inbox_lead_id on their matters/contacts is null and listed in redacted_fields.`;
 
 export function growScopeReport(token: string | undefined) {
   const requested = (ENV.GROW_OAUTH_SCOPE ?? "").split(/\s+/).filter(Boolean);
@@ -257,6 +260,9 @@ export function summarizeGrowPipeline(
   const byStatus: Record<string, number> = {};
   const byType: Record<string, number> = {};
   let hired = 0;
+  let valued = 0;
+  let projectedTotal = 0;
+  const projectedByCategory: Record<string, number> = {};
   for (const m of matters) {
     const cat = m.status_category ?? "unknown";
     byCategory[cat] = (byCategory[cat] ?? 0) + 1;
@@ -265,6 +271,12 @@ export function summarizeGrowPipeline(
     const type = m.type ?? "unknown";
     byType[type] = (byType[type] ?? 0) + 1;
     if (m.hired_date) hired += 1;
+    // projected_value (Clio, 2026-10-21): whole currency units, null when unset.
+    if (typeof m.projected_value === "number") {
+      valued += 1;
+      projectedTotal += m.projected_value;
+      projectedByCategory[cat] = (projectedByCategory[cat] ?? 0) + m.projected_value;
+    }
   }
   return {
     matters_total: matters.length,
@@ -272,6 +284,12 @@ export function summarizeGrowPipeline(
     by_status: byStatus,
     by_matter_type: byType,
     with_hired_date: hired,
+    projected_value: {
+      total: projectedTotal,
+      by_status_category: projectedByCategory,
+      matters_with_value: valued,
+      matters_without_value: matters.length - valued,
+    },
     inbox_leads: leads,
   };
 }
@@ -282,7 +300,7 @@ export function registerGrowTools(server: McpServer): void {
   // OAuth app; this tool proves out the token against Grow in one call.
   server.tool(
     "grow_who_am_i",
-    "Verify Clio Grow API access and return the current Grow user + firm (GET /users/who_am_i on the Grow API). Reports token_source: 'grow_oauth' (you connected the Grow Platform app at /grow/oauth/start) or 'manage_fallback' (no Grow tokens stored; trying the Manage token), plus a scopes block (requested_scope vs the token's actual token_scope, and missing_scope). Use this FIRST if any other grow_* tool errors — a 401/403 with manage_fallback means you need to connect at /grow/oauth/start; a non-empty missing_scope means the stored token predates a scope change and you must reconnect to re-consent. A lead_inbox_all_note in the scopes block means the token lacks grow_lead_inbox_all_read, so inbox leads submitted by other applications come back with inbox_lead_id redacted.",
+    "Verify Clio Grow API access and return the current Grow user + firm (GET /users/who_am_i on the Grow API). Reports token_source: 'grow_oauth' (you connected the Grow Platform app at /grow/oauth/start) or 'manage_fallback' (no Grow tokens stored; trying the Manage token), plus a scopes block (requested_scope vs the token's actual token_scope, and missing_scope). Use this FIRST if any other grow_* tool errors — a 401/403 with manage_fallback means you need to connect at /grow/oauth/start; a non-empty missing_scope means the stored token predates a scope change and you must reconnect to re-consent. A lead_inbox_all_note in the scopes block means the token may lack grow_lead_inbox_all_read, so inbox-lead reads are limited to leads this app submitted (others are silently omitted from lists and 404 by ID).",
     {},
     async () => {
       let tokenSource: string | undefined;
@@ -332,7 +350,7 @@ export function registerGrowTools(server: McpServer): void {
 
   server.tool(
     "get_grow_contacts",
-    "List/search Clio Grow (intake CRM) contacts, or fetch one by contact_id. Returns name, emails, phone_numbers, type (Person/Company), intake status (e.g. Unassigned/Intake/Hired/Did Not Hire), associated Grow matter ids, addresses, and clio_id (the synced Clio Manage contact ID — use it to join to Manage tools like get_contacts). Set include_custom_fields to also return custom_field_values (needs the grow_custom_field_read scope; without it the field comes back null and listed in redacted_fields).",
+    "List/search Clio Grow (intake CRM) contacts, or fetch one by contact_id. Returns name, emails, phone_numbers, type (Person/Company), intake status (e.g. Unassigned/Intake/Hired/Did Not Hire), associated Grow matter ids, addresses, inbox_lead_id (the inbox lead most recently linked to this contact — null if none; null and listed in redacted_fields unless this app submitted the lead or holds grow_lead_inbox_all_read), and clio_id (the synced Clio Manage contact ID — use it to join to Manage tools like get_contacts). Set include_custom_fields to also return custom_field_values (needs the grow_custom_field_read scope; without it the field comes back null and listed in redacted_fields).",
     {
       contact_id: z.number().optional().describe("Fetch a single Grow contact by ID (ignores other filters)"),
       query: z.string().optional().describe("Search across contact names, emails, and phone numbers"),
@@ -358,7 +376,7 @@ export function registerGrowTools(server: McpServer): void {
 
   server.tool(
     "get_grow_matters",
-    "List Clio Grow (intake CRM) matters, or fetch one by matter_id. Grow matters are pipeline records: status_category (intake/hired/declined), status, matter type, hired_date, location, client summary, assignee user ids, inbox_lead_id, is_locked, and clio_id (the synced Clio Manage matter ID — join key to Manage tools like get_matter / get_matter_financial_summary). Filter by inbox_lead_id to find the matter created from a lead, or submitted_only for matters submitted by this app.",
+    "List Clio Grow (intake CRM) matters, or fetch one by matter_id. Grow matters are pipeline records: status_category (intake/hired/declined), status, matter type, hired_date (no longer redacted), projected_value (estimated value, whole currency units, null if unset), first_letter_sent_date (a full timestamp despite the name), first_appointment_created_at (first consultation), location, client summary, assignee user ids, inbox_lead_id (the lead MOST RECENTLY linked — an 'Already added' acceptance overwrites the original; null + redacted_fields unless this app submitted the lead or holds grow_lead_inbox_all_read), is_locked, and clio_id (the synced Clio Manage matter ID — join key to Manage tools like get_matter / get_matter_financial_summary). Filter by inbox_lead_id to find the matter created from a lead, or submitted_only for matters submitted by this app.",
     {
       matter_id: z.number().optional().describe("Fetch a single Grow matter by ID (ignores other filters)"),
       inbox_lead_id: z.number().optional().describe("Only matters created from this inbox lead"),
@@ -476,7 +494,7 @@ export function registerGrowTools(server: McpServer): void {
 
   server.tool(
     "get_grow_inbox_leads",
-    "List Clio Grow inbox leads (new/unprocessed intake leads), or fetch one by lead_id. state is required by the API: 'untriaged' (default — awaiting triage) or 'ignored'. Returns name, email, phone_number, state, timestamps. Note: leads already converted to matters no longer appear here — use get_grow_matters with inbox_lead_id instead.",
+    "List Clio Grow inbox leads (new/unprocessed intake leads), or fetch one by lead_id. state is required by the API: 'untriaged' (default — awaiting triage) or 'ignored'. Returns name, email, phone_number, state, converted_to_matter, converted_to_contact, timestamps. Converted leads (accepted into a matter and/or contact) are NEVER in the list, but ARE returned by lead_id — so to trace a matter or contact back to its lead, take its inbox_lead_id and fetch by lead_id. Visibility depends on scope: with only grow_lead_inbox_read the list holds only leads this app submitted and lead_id returns 404 for any other lead; grow_lead_inbox_all_read returns every lead on the account (see grow_who_am_i).",
     {
       lead_id: z.number().optional().describe("Fetch a single inbox lead by ID (ignores other filters)"),
       state: z.enum(["untriaged", "ignored"]).optional().describe("Lead state to list (default 'untriaged')"),
@@ -486,8 +504,25 @@ export function registerGrowTools(server: McpServer): void {
     async ({ lead_id, state, query, created_since, updated_since, ids, max_results }) => {
       try {
         if (lead_id) {
-          const res = await growGetSingle(`/inbox_leads/${lead_id}`);
-          return ok({ inbox_lead: res?.data ?? res });
+          try {
+            const res = await growGetSingle(`/inbox_leads/${lead_id}`);
+            return ok({ inbox_lead: res?.data ?? res });
+          } catch (err: any) {
+            // Since 2026-10-21 a 404 is also what a token without
+            // grow_lead_inbox_all_read gets for a lead another source submitted.
+            if (err.response?.status === 404) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `Inbox lead ${lead_id} not found (404). Either it does not exist, or it was not submitted by this app and the stored Grow token lacks ${GROW_LEAD_INBOX_ALL_READ} — run grow_who_am_i and check missing_scope.`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+            throw err;
+          }
         }
         const params = growListParams({ created_since, updated_since });
         params.state = state ?? "untriaged";
@@ -628,7 +663,7 @@ export function registerGrowTools(server: McpServer): void {
 
   server.tool(
     "get_grow_pipeline_report",
-    "Intake pipeline snapshot from Clio Grow: matter counts by status_category (intake/hired/declined), by status, by matter type, count with a hired_date, plus untriaged/ignored inbox lead counts. Scope with created_since/updated_since (e.g. this quarter's intake). Join hired matters back to Manage revenue via each matter's clio_id.",
+    "Intake pipeline snapshot from Clio Grow: matter counts by status_category (intake/hired/declined), by status, by matter type, count with a hired_date, total projected_value (overall and by status_category, with counts of matters lacking a value), plus untriaged/ignored inbox lead counts (converted leads are never counted; without grow_lead_inbox_all_read only this app's own leads are counted, and a lead_scope_note is attached). Scope with created_since/updated_since (e.g. this quarter's intake). Join hired matters back to Manage revenue via each matter's clio_id.",
     {
       created_since: sinceFilters.created_since,
       updated_since: sinceFilters.updated_since,
@@ -656,10 +691,21 @@ export function registerGrowTools(server: McpServer): void {
           leads = { untriaged: untriaged.length, ignored: ignored.length };
         }
 
+        // Flag a possible silent lead undercount (2026-10-21 scope enforcement).
+        let leadScopeNote: string | undefined;
+        if (leads) {
+          try {
+            leadScopeNote = growScopeReport((await resolveGrowBearer()).token).lead_inbox_all_note;
+          } catch {
+            /* diagnostics only — never fail the report over it */
+          }
+        }
+
         const summary = summarizeGrowPipeline(matters, leads);
         return ok({
           window: { created_since: created_since ?? null, updated_since: updated_since ?? null },
           ...summary,
+          ...(leadScopeNote ? { lead_scope_note: leadScopeNote } : {}),
           ...(include_matters ? { matters } : {}),
         });
       } catch (err: any) {

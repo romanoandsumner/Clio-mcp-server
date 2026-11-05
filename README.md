@@ -321,9 +321,9 @@ which token was used (`token_source`) and diagnoses 401/403s.
 |------|-------------|
 | `grow_who_am_i` | Verify Grow API access; returns the current Grow user + firm (the auth probe) |
 | `get_grow_contacts` | List/search Grow contacts or fetch one; includes intake `status` and `clio_id` (synced Manage contact ID) |
-| `get_grow_matters` | List Grow pipeline matters or fetch one; `status_category` (intake/hired/declined), `hired_date`, `clio_id` join key, `inbox_lead_id`/`submitted_only` filters |
+| `get_grow_matters` | List Grow pipeline matters or fetch one; `status_category` (intake/hired/declined), `hired_date`, `projected_value`, `first_letter_sent_date`, `first_appointment_created_at`, `clio_id` join key, `inbox_lead_id`/`submitted_only` filters |
 | `get_grow_notes` / `create_grow_note` | Read/write notes on a Grow contact or matter |
-| `get_grow_inbox_leads` | List untriaged/ignored inbox leads or fetch one |
+| `get_grow_inbox_leads` | List untriaged/ignored inbox leads or fetch one; converted leads (`converted_to_matter`/`converted_to_contact`) are returned by `lead_id` only |
 | `create_grow_inbox_lead` | Submit a lead into the Grow lead inbox (API successor to the legacy form endpoint) |
 | `get_grow_sources` / `create_grow_source` | List/create the firm's lead (marketing) sources |
 | `get_grow_users` | List Grow account users (IDs match `matter_assignee_ids`) |
@@ -362,6 +362,36 @@ which token was used (`token_source`) and diagnoses 401/403s.
 | **Railway env vars** | Railway ignores `.env` files — set every variable in the Railway dashboard |
 
 ## Changelog
+
+### 2026-11-05 — Grow: Clio API releases of 2026-10-21 and 2026-11-03
+**Lead-scope enforcement (Clio, 2026-10-21) — the one that bites.** A token
+holding only `grow_lead_inbox_read` now sees only the inbox leads this app
+submitted. Website-form, Grow-entered, and other-app leads are silently dropped
+from `get_grow_inbox_leads` and from the `get_grow_pipeline_report` lead counts,
+and fetching one by `lead_id` returns 404. This supersedes the 2026-09-10 entry
+below ("not a breaking change"). The default scope set already requests
+`grow_lead_inbox_all_read`; any user whose stored token predates it must
+reconnect at `/grow/oauth/start`. `grow_who_am_i` flags this, the pipeline report
+now attaches a `lead_scope_note` when the scope is unconfirmed, and a 404 on a
+lead fetch now says the scope may be the cause.
+
+**Matter fields (2026-10-21).** `projected_value`, `first_letter_sent_date` (a
+timestamp despite the name), and `first_appointment_created_at` are documented on
+`get_grow_matters`. `hired_date` is no longer redacted, so `with_hired_date` in
+the pipeline report can rise for matters this app did not originate — that is a
+correction, not new hires. The pipeline report adds a `projected_value` block
+(total, by status_category, and how many matters have no value set).
+
+**Converted leads and Contact `inbox_lead_id` (2026-11-03).** `GET
+/inbox_leads/{id}` now returns converted leads with `converted_to_matter` /
+`converted_to_contact`; the list still excludes them. Contacts now carry
+`inbox_lead_id`. On both matters and contacts it is the lead *most recently*
+linked — an "Already added" acceptance overwrites the original, so it is not a
+reliable first-touch attribution key. A lead accepted onto an existing contact
+AND an existing matter writes no `inbox_lead_id` anywhere (Clio known limitation).
+
+`docs/clio-grow.openapi.yaml` was hand-patched with these fields; re-vendor from
+Clio's spec when it is published.
 
 ### 2026-09-10 — Grow scope: `grow_lead_inbox_all_read`
 Added Clio's `grow_lead_inbox_all_read` scope (released 2026-09-02) to the

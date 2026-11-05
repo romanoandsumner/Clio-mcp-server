@@ -39,6 +39,25 @@ describe("summarizeGrowPipeline", () => {
     expect(s.inbox_leads).toEqual({ untriaged: 3, ignored: 1 });
   });
 
+  it("totals projected_value overall and by status_category, ignoring nulls", () => {
+    const s = summarizeGrowPipeline(
+      [
+        { status_category: "intake", projected_value: 10000 },
+        { status_category: "hired", projected_value: 25000 },
+        { status_category: "hired", projected_value: 5000 },
+        { status_category: "declined", projected_value: null },
+        { status_category: "intake" },
+      ],
+      null
+    );
+    expect(s.projected_value).toEqual({
+      total: 40000,
+      by_status_category: { intake: 10000, hired: 30000 },
+      matters_with_value: 3,
+      matters_without_value: 2,
+    });
+  });
+
   it("handles empty matters and null leads (include_leads=false)", () => {
     const s = summarizeGrowPipeline([], null);
     expect(s.matters_total).toBe(0);

@@ -1801,6 +1801,14 @@ components:
           format: date-time
           description: The time the contact was last updated (ISO-8601 timestamp)
           example: '2024-02-20T14:45:00Z'
+        inbox_lead_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: ID of the inbox lead most recently linked to this contact (an
+            "Already added" acceptance overwrites an earlier link). Null when no lead
+            is linked. May be redacted. (Clio changelog 2026-11-03.)
+          example: 321
         custom_field_values:
           type: array
           nullable: true
@@ -2009,14 +2017,36 @@ components:
           type: integer
           format: int64
           nullable: true
-          description: ID of the associated inbox lead. May be redacted.
+          description: ID of the inbox lead most recently linked to this matter (an
+            "Already added" acceptance overwrites an earlier link). May be redacted.
           example: 321
         hired_date:
           type: string
           format: date
           nullable: true
-          description: The date the client was hired. May be redacted.
+          description: The date the client was hired. No longer redacted as of
+            2026-10-21 — returned to every application with matter_read.
           example: '2024-04-01'
+        projected_value:
+          type: integer
+          nullable: true
+          description: Estimated monetary value of the matter, in whole currency
+            units. Null when not set. (Clio changelog 2026-10-21.)
+          example: 25000
+        first_letter_sent_date:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp the first letter for the matter was sent. A full
+            timestamp despite the name. (Clio changelog 2026-10-21.)
+          example: '2024-03-01T15:00:00Z'
+        first_appointment_created_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp the first consultation for the matter was created.
+            (Clio changelog 2026-10-21.)
+          example: '2024-02-25T18:30:00Z'
         is_locked:
           type: boolean
           description: Whether the matter is locked. Locked matters are read-only.
@@ -2170,6 +2200,17 @@ components:
           format: date-time
           description: The time the lead was last updated (ISO-8601 timestamp)
           example: '2024-02-20T14:45:00Z'
+        converted_to_matter:
+          type: boolean
+          description: true when the inbox lead has been converted into a matter.
+            Converted leads are returned only by GET /inbox_leads/{id}, never by the
+            list endpoint. (Clio changelog 2026-11-03.)
+          example: false
+        converted_to_contact:
+          type: boolean
+          description: true when the inbox lead has been converted into a contact.
+            (Clio changelog 2026-11-03.)
+          example: false
         marketing_source:
           type: object
           additionalProperties: false
