@@ -37,6 +37,17 @@ describe("aggregateMonthFees", () => {
     expect(agg.orig[1]).toBe(1000);  // PAR (originator) → col V
   });
 
+  it("tags each working timekeeper's fees by responsible attorney (0 = non-roster) for bonus matter splits", () => {
+    const rows = [
+      row({ User: "Kenny Sumner", "Responsible Attorney": "Nicholas Noe", "Billed Time Collected": "100" }),
+      row({ User: "Kenny Sumner", "Responsible Attorney": "Kenny Sumner", "Billed Time Collected": "40" }),
+      row({ User: "Kenny Sumner", "Responsible Attorney": "Someone Else", "Billed Time Collected": "5" }),
+    ];
+    const agg = aggregateMonthFees(rows, ROSTER);
+    expect(agg.indivResp[2]).toEqual({ 3: 100, 2: 40, 0: 5 });
+    expect(agg.indiv[2]).toBe(145); // per-responsible tags sum to the col-N figure
+  });
+
   it("pools non-roster billers so Σ col N (+NRB) == Σ col S (+NRB) == Σ col V (+NRB) == firm fees", () => {
     const rows = [
       row({ User: "Paul Romano", "Responsible Attorney": "Paul Romano", "Originating Attorney": "Paul Romano", "Billed Time Collected": "500" }),
