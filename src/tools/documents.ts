@@ -3463,8 +3463,8 @@ export function registerDocumentTools(server: McpServer): void {
   // ============================================================
   server.tool(
     "get_dashboard_status",
-    "Check a background job by job_id: returns running | done | error, timestamps, and (when finished) the full result or error. Poll this after calling download_dashboard_update or download_all_weekly_goals, which return immediately with a job_id.",
-    { job_id: z.string().describe("The job_id returned by download_dashboard_update or download_all_weekly_goals") },
+    "Check a background job by job_id: returns running | done | error, timestamps, and (when finished) the full result or error. Poll this after calling download_dashboard_update, download_all_weekly_goals or download_monthly_goals_summary, which return immediately with a job_id, or after a Clio report tool (get_fee_allocation, get_monthly_fee_allocation, get_fee_allocation_detail, get_monthly_revenue, get_responsible_collections) answers with a job_id because the report took longer than ~45s.",
+    { job_id: z.string().describe("The job_id returned by a background-capable tool") },
     async (p) => {
       const j = dashboardJobs.get(p.job_id);
       if (!j) {
