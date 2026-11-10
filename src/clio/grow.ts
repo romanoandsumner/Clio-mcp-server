@@ -1,4 +1,5 @@
 import https from "https";
+import { createPagingGuard } from "./pagingGuard";
 import { ENV } from "../utils/env";
 import { getAccessToken } from "../utils/tokenStore";
 import { getContext } from "../auth/identity";
@@ -189,7 +190,11 @@ export async function growFetchAllPages<T>(
     ? `${growBaseUrl()}${url}?${qs}`
     : `${growBaseUrl()}${url}`;
 
+  // Fail loudly if Grow's next link ever repeats — see clio/pagingGuard.ts.
+  const guard = createPagingGuard();
+
   while (nextUrl) {
+    guard.visit(nextUrl);
     const data = await withAuthRetry((token) => growRequest("GET", nextUrl!, token));
     results.push(...(data.data ?? []));
     if (maxResults && results.length >= maxResults) {
