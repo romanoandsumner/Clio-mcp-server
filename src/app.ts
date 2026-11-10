@@ -8,6 +8,7 @@ import { buildUserContext, NotProvisionedError } from "./auth/vault";
 import { registerOAuthProxyRoutes } from "./auth/oauthProxy";
 import { resolveStaticApiKey } from "./auth/apiKeys";
 import { applyToolProfile, ToolProfile } from "./tools/profiles";
+import { diagnosticToolsEnabled } from "./utils/diagnostics";
 import {
   getGrowAuthorizationUrl,
   exchangeGrowCodeForTokens,
@@ -51,12 +52,94 @@ import { CLIO_ICON_PNG, CLIO_ICON_DATA_URI } from "./branding/clioIcon";
 
 // --- MCP Server Factory ---
 // A fresh McpServer is created for every POST /mcp (see the stateless
-// transport note below), so registration must be quiet on the hot path —
-// the per-module checklist is logged only for the first instance.
+// transport note below), but the tool REGISTRATIONS are built only once per
+// profile and replayed onto each new server.
+//
+// Why: the register* functions build every tool's zod schema, and zod/v4's
+// `.describe()` stores each schema in `globalRegistry` — a process-global,
+// strongly-held Map in zod 3.25.x. Running them per request pinned a complete
+// copy of the tool surface (~10 MB) on the heap for EVERY request, forever;
+// the process died with "JavaScript heap out of memory" after a few hundred
+// requests (2026-11-10, ~4h of uptime). Building the schemas once keeps the
+// registry at a fixed size. Handlers are stateless closures — none captures
+// the server it was registered on — so sharing them across servers is safe.
+// Guarded by test/mcpServerFactoryMemory.test.ts.
+type ToolRegistration = unknown[];
+// Keyed on the diagnostic flag as well as the profile: ENABLE_DIAGNOSTIC_TOOLS
+// is read at registration time (utils/diagnostics.ts), so the two surfaces
+// differ. At most profiles x 2 entries — a fixed bound.
+const registrationsByKey = new Map<string, ToolRegistration[]>();
+
+function buildToolRegistrations(profile: ToolProfile): ToolRegistration[] {
+  const registrations: ToolRegistration[] = [];
+  // The tool modules only ever call `server.tool(...)` and ignore its return
+  // value (the same assumption applyToolProfile and utils/diagnostics.ts rely
+  // on), so a recorder exposing just `tool` stands in for the server.
+  const recorder = {
+    tool: (...args: unknown[]) => {
+      registrations.push(args);
+      return undefined;
+    },
+  } as unknown as McpServer;
+
+  // Must precede every register* call: the profile filters registration
+  // itself, so a tool outside the profile is never created at all and
+  // cannot appear in tools/list. See tools/profiles.ts.
+  applyToolProfile(recorder, profile);
+
+  registerMatterTools(recorder);
+  registerMatterFinancialsTools(recorder);
+  registerTimeTools(recorder);
+  registerExpenseTools(recorder);
+  registerContactTools(recorder);
+  registerTaskTools(recorder);
+  registerBillTools(recorder);
+  registerPaymentTools(recorder);
+  registerARTools(recorder);
+  registerPerformanceTools(recorder);
+  registerReconcileTools(recorder);
+  registerScorecardTools(recorder);
+  registerCalendarTools(recorder);
+  registerCustomFieldTools(recorder);
+  // ARCHIVED 2026-08-24 — get_attributable_collections (V&D Of Counsel comp)
+  // is unwired; that calculation now lives in a separate skill. Source kept
+  // in tools/calc.ts as registerArchivedCalcTools. Also unwired, same date:
+  // generate_firm_scorecard (tools/scorecard.ts →
+  // registerArchivedFirmScorecardTool) and download_firm_scorecard +
+  // download_vd_statement (tools/documents.ts →
+  // registerArchivedDocumentTools) — the firm scorecard is archival.
+  registerDocumentTools(recorder);
+  registerAuditTools(recorder);
+  registerAuditTimeTools(recorder);
+  registerMorningReportTools(recorder);
+  registerVersionTools(recorder);
+  registerWhoAmITools(recorder);
+  registerNoteTools(recorder);
+  registerGrowTools(recorder);
+  registerClioDocumentTools(recorder);
+  registerReminderTools(recorder);
+  registerTimerTools(recorder);
+  registerLookupTools(recorder);
+  registerCommunicationTools(recorder);
+  registerClioPaymentsTools(recorder);
+  registerBillingExtrasTools(recorder);
+  registerBillsGapTools(recorder);
+  registerBillSentTools(recorder);
+
+  return registrations;
+}
+
 let loggedRegistration = false;
 const loggedProfiles = new Set<ToolProfile>();
 export function createMcpServer(profile: ToolProfile = "full"): McpServer {
   try {
+    const cacheKey = `${profile}:${diagnosticToolsEnabled() ? "diag" : "nodiag"}`;
+    let registrations = registrationsByKey.get(cacheKey);
+    if (!registrations) {
+      registrations = buildToolRegistrations(profile);
+      registrationsByKey.set(cacheKey, registrations);
+    }
+
     const server = new McpServer({
       name: "clio-mcp",
       title: "Clio",
@@ -66,50 +149,8 @@ export function createMcpServer(profile: ToolProfile = "full"): McpServer {
         { src: CLIO_ICON_DATA_URI, mimeType: "image/png", sizes: ["192x192"] },
       ],
     });
-
-    // Must precede every register* call: the profile filters registration
-    // itself, so a tool outside the profile is never created at all and
-    // cannot appear in tools/list. See tools/profiles.ts.
-    applyToolProfile(server, profile);
-
-    registerMatterTools(server);
-    registerMatterFinancialsTools(server);
-    registerTimeTools(server);
-    registerExpenseTools(server);
-    registerContactTools(server);
-    registerTaskTools(server);
-    registerBillTools(server);
-    registerPaymentTools(server);
-    registerARTools(server);
-    registerPerformanceTools(server);
-    registerReconcileTools(server);
-    registerScorecardTools(server);
-    registerCalendarTools(server);
-    registerCustomFieldTools(server);
-    // ARCHIVED 2026-08-24 — get_attributable_collections (V&D Of Counsel comp)
-    // is unwired; that calculation now lives in a separate skill. Source kept
-    // in tools/calc.ts as registerArchivedCalcTools. Also unwired, same date:
-    // generate_firm_scorecard (tools/scorecard.ts →
-    // registerArchivedFirmScorecardTool) and download_firm_scorecard +
-    // download_vd_statement (tools/documents.ts →
-    // registerArchivedDocumentTools) — the firm scorecard is archival.
-    registerDocumentTools(server);
-    registerAuditTools(server);
-    registerAuditTimeTools(server);
-    registerMorningReportTools(server);
-    registerVersionTools(server);
-    registerWhoAmITools(server);
-    registerNoteTools(server);
-    registerGrowTools(server);
-    registerClioDocumentTools(server);
-    registerReminderTools(server);
-    registerTimerTools(server);
-    registerLookupTools(server);
-    registerCommunicationTools(server);
-    registerClioPaymentsTools(server);
-    registerBillingExtrasTools(server);
-    registerBillsGapTools(server);
-    registerBillSentTools(server);
+    const register = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    for (const args of registrations) register(...args);
 
     if (!loggedRegistration) {
       loggedRegistration = true;
