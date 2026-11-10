@@ -4,6 +4,7 @@ import { getContext } from "../auth/identity";
 import { refreshAccessToken } from "./auth";
 import { withBackoff } from "./rateLimit";
 import https from "https";
+import { createPagingGuard } from "./pagingGuard";
 
 /**
  * Build a query string preserving Clio field syntax (curly braces, commas).
@@ -96,8 +97,11 @@ export async function fetchAllPages<T>(
   const allParams = { order: "id(asc)", ...params, limit: 200 };
   const qs = buildQueryString(allParams);
   let nextUrl: string | undefined = `${baseUrl}${url}?${qs}`;
+  // Fail loudly if Clio's next link ever repeats — see clio/pagingGuard.ts.
+  const guard = createPagingGuard();
 
   while (nextUrl) {
+    guard.visit(nextUrl);
     const data = await withBackoff(async () => {
       try {
         return await rawGet(nextUrl!);
