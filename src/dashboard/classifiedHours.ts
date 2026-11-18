@@ -402,15 +402,40 @@ export async function buildMatterClientMap(): Promise<Map<number, number>> {
  * than as 0 hours.
  */
 export async function buildContingencyMatterSet(): Promise<Set<number> | null> {
+  return (await buildContingencyMatters())?.ids ?? null;
+}
+
+/** Contingency matters by id (for time entries) and by display-number prefix (for
+ *  Clio report CSV rows, which carry the matter's display number, not its id). */
+export type ContingencyMatters = { ids: Set<number>; prefixes: Set<string> };
+
+/**
+ * Leading matter number of a display number or report "Matter" cell —
+ * "03061-Teachworth, Walter & Joan…" → "03061". null when the text doesn't
+ * start with digits, so an unparseable row is never matched by accident.
+ */
+export function matterNumberPrefix(text: string | undefined | null): string | null {
+  const m = /^\s*(\d{3,6})(?=\D|$)/.exec(text ?? "");
+  return m ? m[1] : null;
+}
+
+/** Same pull as buildContingencyMatterSet, also keyed by matter-number prefix. */
+export async function buildContingencyMatters(): Promise<ContingencyMatters | null> {
   try {
     const matters = await fetchAllPages<any>("/matters", {
-      fields: "id,custom_field_values{id,field_name,value}",
+      fields: "id,display_number,custom_field_values{id,field_name,value}",
     });
-    const set = new Set<number>();
-    for (const m of matters) if (typeof m?.id === "number" && isContingencyMatter(m)) set.add(m.id);
-    return set;
+    const ids = new Set<number>();
+    const prefixes = new Set<string>();
+    for (const m of matters) {
+      if (typeof m?.id !== "number" || !isContingencyMatter(m)) continue;
+      ids.add(m.id);
+      const p = matterNumberPrefix(m.display_number);
+      if (p) prefixes.add(p);
+    }
+    return { ids, prefixes };
   } catch (e: any) {
-    console.warn(`[Goals] contingency matter pull failed (${e?.message ?? e}); contingency hours reported as unavailable`);
+    console.warn(`[Goals] contingency matter pull failed (${e?.message ?? e}); contingency figures reported as unavailable`);
     return null;
   }
 }
@@ -454,6 +479,8 @@ export async function classifyYtdTimeEntries(opts: {
   excludeInternal?: boolean;
   /** Tag entries on Contingency-flagged matters (one extra /matters pull). Default false. */
   withContingency?: boolean;
+  /** Pre-fetched contingency matter ids — skips the pull when the caller already has them. */
+  contingencyMatterIds?: Set<number> | null;
 }): Promise<ClassifiedTimeEntry[]> {
   const startDate = `${opts.year}-01-01`;
   const excludeInternal = opts.excludeInternal !== false;
@@ -461,7 +488,9 @@ export async function classifyYtdTimeEntries(opts: {
   // Only needed for rule (a); skipped entirely on the legacy raw path so
   // exclude_internal=false costs exactly what it did before.
   const clientByMatter = excludeInternal ? await buildMatterClientMap() : undefined;
-  const contingencyMatters = opts.withContingency ? await buildContingencyMatterSet() : null;
+  const contingencyMatters = opts.contingencyMatterIds !== undefined
+    ? opts.contingencyMatterIds
+    : opts.withContingency ? await buildContingencyMatterSet() : null;
 
   const raw: RawTimeEntry[] = [];
   for (const userId of opts.userIds) {
