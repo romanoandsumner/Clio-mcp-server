@@ -581,6 +581,10 @@ export async function fetchRealizationHours(opts: {
   /** Per-timekeeper dollars from the SAME rows — empty on the legacy path, whose
    *  source carries no credit/collection columns. */
   dollars: Record<number, RealizDollarsAgg>;
+  /** The Realization report rows `agg` was built from, so a caller can
+   *  re-aggregate a subset (e.g. ex-contingency) without a second report.
+   *  Absent on the legacy path. */
+  rows?: Record<string, string>[];
   clientActivityReportId?: number;
   realizationReportId?: number;
 }> {
@@ -611,6 +615,7 @@ export async function fetchRealizationHours(opts: {
   return {
     agg: aggregateRealizationHours(rr.rows, opts.nameToUid, { placeholderKeys: opts.placeholderKeys }),
     dollars: aggregateRealizationDollars(rr.rows, opts.nameToUid),
+    rows: rr.rows,
     realizationReportId: rr.report.id,
   };
 }

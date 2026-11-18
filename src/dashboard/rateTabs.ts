@@ -53,6 +53,32 @@ export function patchUtilizationBlock(
   return { xml, patched };
 }
 
+/**
+ * Read one numeric column of a month block, keyed by user_id (e.g. the
+ * Utilization tab's Available, col F). Rows whose initials don't map, or whose
+ * cell isn't a number, are omitted.
+ */
+export function readTabColumnByUid(
+  xml: string,
+  monthAbbr: string,
+  sharedStrings: string[],
+  dataCols: string[],
+  col: string,
+  initialsToUid: Record<string, number>,
+  aliases: Record<string, string>,
+): Record<number, number> {
+  const out: Record<number, number> = {};
+  const block = findTabMonthBlock(xml, monthAbbr, sharedStrings, dataCols);
+  if (!block) return out;
+  for (const { row, ini } of block.attorneys) {
+    const uid = initialsToUid[aliases[ini] ?? ini];
+    if (!uid) continue;
+    const v = parseFloat(readCell(xml, `${col}${row}`, sharedStrings));
+    if (Number.isFinite(v)) out[uid] = v;
+  }
+  return out;
+}
+
 // Marker on the auto-generated "Firm Average" summary table appended to the
 // bottom of the Utilization / Realization tabs, so it can be stripped and
 // refreshed in place each run.
