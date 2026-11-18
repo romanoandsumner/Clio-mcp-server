@@ -6,7 +6,7 @@ import { buildMonthlyCollections } from "../dashboard/collections";
 import { buildMonthlyBilled } from "../dashboard/billed";
 import { buildExcludedHoursByMonth, feePlaceholderKeys } from "../dashboard/excludedHours";
 import {
-  classifyYtdTimeEntries, addToTotals, emptyTotals,
+  classifyYtdTimeEntries, addToTotals, emptyTotals, assertTotalsReconcile,
   type ClassifiedTimeEntry, type HoursTotals,
 } from "../dashboard/classifiedHours";
 import { buildWorkedHoursSplitByMonth } from "../dashboard/workedHours";
@@ -212,10 +212,13 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
   const entries = (params.entries
     ?? await classifyYtdTimeEntries({
       year: params.year, endDate, userIds: [params.user_id],
-      excludeInternal,
+      excludeInternal, withContingency: true,
     })
   ).filter((e) => e.uid === params.user_id);
   const userName = entries[0]?.userName ?? "Unknown";
+  // Contingency is reported only when every entry was actually tagged; a failed
+  // matter lookup leaves entries null and the line reads "n/a", never 0.
+  const contingencyAvailable = entries.every((e) => e.contingency !== null);
 
   // Group by month and week
   const months: Record<string, HoursTotals> = {};
@@ -285,12 +288,14 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
 
   // Summary (Monthly) sheet
   const ws1 = wb.addWorksheet("Summary");
-  ws1.addRow(["Month", "Billable Goal", "Billable Actual", "Over/Under", "Nonbillable", "Total", "Available", "Utilization %"]).font = { bold: true };
+  ws1.addRow(["Month", "Billable Goal", "Billable Actual", "Over/Under", "Nonbillable", "Total", "Available", "Utilization %", "Contingency Hrs"]).font = { bold: true };
 
   let cumBillable = 0, cumGoal = 0, monthsCounted = 0;
   // Legacy flag-only YTD billable plus the internal-adjustment breakdown, so the
   // sheet and its `figures` payload always reconcile the two bases explicitly.
   let cumBillableRaw = 0, cumInternal = 0, cumFirmSelf = 0, cumZeroValue = 0, cumFirmSelfRated = 0;
+  // Full YTD totals bucket, used to assert the bases reconcile before anything ships.
+  const ytdT = emptyTotals();
   const currentMonth = new Date().getMonth() + 1; // 1-indexed
   const isCurrentYear = params.year === new Date().getFullYear();
 
@@ -317,14 +322,19 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
       cumFirmSelf += data.firmSelfClientHours;
       cumZeroValue += data.zeroValueHours;
       cumFirmSelfRated += data.firmSelfClientRatedHours;
+      for (const k of Object.keys(ytdT) as (keyof HoursTotals)[]) ytdT[k] += data[k];
     }
     const ou = round1(data.billable - goal);
     const util = round1((data.billable / availPerMonth) * 100);
-    const row = ws1.addRow([monthNames[m - 1], goal, round1(data.billable), ou, round1(data.nonbillable), round1(data.billable + data.nonbillable), avail, util]);
+    const row = ws1.addRow([monthNames[m - 1], goal, round1(data.billable), ou, round1(data.nonbillable), round1(data.billable + data.nonbillable), avail, util,
+      contingencyAvailable ? round1(data.contingencyHours) : "n/a"]);
     row.getCell(4).font = { color: { argb: ou >= 0 ? "FF008000" : "FFFF0000" } };
   }
   const ytdUtil = monthsCounted > 0 ? round1((cumBillable / (availPerMonth * monthsCounted)) * 100) : 0;
-  const totRow = ws1.addRow(["YTD Total", round1(cumGoal), round1(cumBillable), round1(cumBillable - cumGoal), "", "", "", ytdUtil]);
+  // Throws (fails this person's sheet) rather than shipping numbers that don't tie.
+  if (excludeInternal) assertTotalsReconcile(ytdT, `${userName} (${params.user_id}) ${params.year}`);
+  const totRow = ws1.addRow(["YTD Total", round1(cumGoal), round1(cumBillable), round1(cumBillable - cumGoal), "", "", "", ytdUtil,
+    contingencyAvailable ? round1(ytdT.contingencyHours) : "n/a"]);
   totRow.font = { bold: true };
   totRow.getCell(4).font = { bold: true, color: { argb: (cumBillable - cumGoal) >= 0 ? "FF008000" : "FFFF0000" } };
 
@@ -359,6 +369,14 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
         .font = { italic: true, color: { argb: "FFC00000" } };
     }
   }
+  if (excludeInternal) {
+    ws1.addRow([`Internal time logged YTD (firm-client matters + any $0-rate/$0-amount entry, regardless of the Clio flag): ${round1(ytdT.internalTotalHours)} hrs — ${round1(ytdT.internalSelfFlaggedHours)} already flagged non-billable by the timekeeper, ${round1(ytdT.internalHours)} flagged billable and moved by the adjustment above.`])
+      .font = { italic: true, color: { argb: "FF666666" } };
+  }
+  ws1.addRow([contingencyAvailable
+    ? `Contingency Hrs = all worked time (billable + nonbillable, fee placeholders excluded) on matters with the Contingency box checked in Clio. YTD ${round1(ytdT.contingencyHours)} hrs, of which ${round1(ytdT.contingencyBillableHours)} counted billable. It is a breakdown of hours already in the columns above, not an addition.`
+    : "Contingency Hrs: n/a — the Clio contingency-matter lookup failed this run."])
+    .font = { italic: true, color: { argb: "FF666666" } };
 
   // Weekly sheet: horizontal layout - weeks as columns, metrics as rows
   const ws2 = wb.addWorksheet("Weekly");
@@ -401,6 +419,15 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
   for (let i = 0; i < allWeeks.length; i++) {
     const data = weeks[allWeeks[i].key];
     ws2.getRow(7).getCell(i + 3).value = round1((data?.billable ?? 0) + (data?.nonbillable ?? 0));
+  }
+
+  // Row 8: hours on Contingency-flagged matters — a breakdown of row 7, not additive.
+  ws2.getCell("B8").value = "Contingency";
+  ws2.getCell("B8").font = { bold: true };
+  for (let i = 0; i < allWeeks.length; i++) {
+    if (allWeeks[i].monDate > today) break;
+    const data = weeks[allWeeks[i].key];
+    ws2.getRow(8).getCell(i + 3).value = contingencyAvailable ? round1(data?.contingencyHours ?? 0) : "n/a";
   }
 
   ws2.getCell("B9").value = "Billable Goal";
@@ -494,6 +521,16 @@ async function downloadWeeklyGoals(params: WeeklyGoalsParams): Promise<{
       // $0, so a material figure means rule (a) caught real client work filed
       // under the firm's own client. See dashboard/classifiedHours.ts.
       internal_firm_self_client_rated_ytd: round1(cumFirmSelfRated),
+      // ALL internal-rule hours regardless of the Clio flag, and the part the
+      // timekeeper already flagged. internal_total == reclassified + self_flagged
+      // (asserted above). null on the legacy basis, where rule (a) isn't resolved.
+      internal_total_ytd: excludeInternal ? round1(ytdT.internalTotalHours) : null,
+      internal_self_flagged_nonbillable_ytd: excludeInternal ? round1(ytdT.internalSelfFlaggedHours) : null,
+      // Worked hours on Contingency-flagged matters (a breakdown, not additive).
+      // null when the contingency lookup failed.
+      week_contingency: contingencyAvailable ? round1(wk.contingencyHours) : null,
+      ytd_contingency: contingencyAvailable ? round1(ytdT.contingencyHours) : null,
+      ytd_contingency_billable: contingencyAvailable ? round1(ytdT.contingencyBillableHours) : null,
       prior_month_collections: collectionsValue != null
         ? { month: collectionsLabel, amount: round2(collectionsValue) }
         : null,
@@ -843,6 +880,8 @@ export function registerDocumentTools(server: McpServer): void {
     "BILLABLE CLASSIFICATION NOW CONSULTS THE MATTER'S CLIENT AND THE ENTRY'S RATE, not just the Clio non-billable flag. An entry counts as nonbillable when its native non_billable flag is set, OR — when exclude_internal is true (the DEFAULT) — when either (a) the matter's client is the firm itself, Romano & Sumner, LLC (the structural signal: catches 02888-Admin, 00050-Potential Clients and any future internal matter automatically), or (b) the entry is billable-flagged but carries rate 0 AND amount 0 (the rate-based safety net for internal time booked under another client). Reclassified hours MOVE to nonbillable rather than disappearing, so total tracked time is identical on both bases; synthetic fee-placeholder entries are still dropped from both. " +
     "The sheet and its Utilization % are on the ADJUSTED basis; the firm dashboard (26 Compare col I and the Utilization tab) uses the same adjusted basis, so the two still reconcile. " +
     "The response always includes a `figures` object (current-week and YTD billable vs goal, trailing 4-week average, utilization, prior-month collections) so results can be read without opening the workbook, plus the legacy flag-only twins — ytd_billable_raw, ytd_over_under_raw, ytd_utilization_raw_pct, week_billable_raw, trailing_4wk_avg_billable_raw — and internal_reclassified_ytd broken out by rule, so the two bases always reconcile explicitly. " +
+    "internal_reclassified_ytd counts ONLY internal hours that were flagged billable in Clio (the ones the adjustment moved); internal_total_ytd counts ALL internal-rule hours regardless of the flag, and internal_self_flagged_nonbillable_ytd the part the timekeeper already flagged — total = reclassified + self_flagged, asserted on every run. " +
+    "Contingency: week_contingency / ytd_contingency / ytd_contingency_billable report worked hours on matters whose Clio 'Contingency' box is checked (a breakdown of tracked hours, not additive; null if the lookup failed), shown as the Weekly sheet's 'Contingency' row and the Summary's 'Contingency Hrs' column. " +
     "Also returns either box_url (uploaded) or a short-lived direct_download_url (1-hour TTL) the user can click to download the file.",
     {
       user_id: z.coerce.number().describe("User/timekeeper ID"),
@@ -882,7 +921,7 @@ export function registerDocumentTools(server: McpServer): void {
     "download_all_weekly_goals",
     "Update the weekly goals spreadsheet for all firm timekeepers, uploading to Box in parallel. " +
     "BILLABLE CLASSIFICATION NOW CONSULTS THE MATTER'S CLIENT AND THE ENTRY'S RATE, not just the Clio non-billable flag. An entry counts as nonbillable when its native non_billable flag is set, OR — when exclude_internal is true (the DEFAULT) — when either (a) the matter's client is the firm itself, Romano & Sumner, LLC (the structural signal: catches 02888-Admin, 00050-Potential Clients and any future internal matter automatically), or (b) the entry is billable-flagged but carries rate 0 AND amount 0 (the rate-based safety net for internal time booked under another client). Reclassified hours MOVE to nonbillable rather than disappearing, so total tracked time is identical on both bases; synthetic fee-placeholder entries are still dropped from both. " +
-    "The roster is classified ONCE for the whole firm and each sheet is handed its slice. Each per-person `figures` payload carries both bases (billable plus its _raw twin) and internal_reclassified_ytd. " +
+    "The roster is classified ONCE for the whole firm and each sheet is handed its slice. Each per-person `figures` payload carries both bases (billable plus its _raw twin), internal_reclassified_ytd (billable-flagged internal hours moved), internal_total_ytd (all internal hours regardless of flag), and ytd_contingency (hours on Contingency-flagged matters). " +
     "The full batch regenerates every sheet from Clio time entries and can exceed the MCP client's ~180s timeout, " +
     "so it runs as a background job: this tool returns a job_id immediately — poll get_dashboard_status with it " +
     "for the per-person results (status, box_url, and key figures for each timekeeper). No arguments required.",
@@ -915,6 +954,7 @@ export function registerDocumentTools(server: McpServer): void {
         endDate: new Date().toISOString().split("T")[0],
         userIds: WEEKLY_GOALS_ROSTER.map((r) => r.user_id),
         excludeInternal,
+        withContingency: true,
       });
 
 

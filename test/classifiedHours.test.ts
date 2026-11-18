@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyRawEntries, isNonBillableEntry, isFirmSelfClient, isZeroValueBillable,
   internalReasonFor, sumTotals, FIRM_SELF_CLIENT_ID, toRawTimeEntry,
+  matchesInternalRuleIgnoringFlag, assertTotalsReconcile,
   type RawTimeEntry,
 } from "../src/dashboard/classifiedHours";
 
@@ -310,6 +311,7 @@ describe("toRawTimeEntry", () => {
       id: 5, uid: 7, userName: "PAR", date: "2026-03-05", hours: 2,
       rate: 400, amount: 800, matterId: ADMIN_MATTER,
       clientId: FIRM_SELF_CLIENT_ID, nonBillableFlag: false,
+      contingency: null, // no contingency set passed → unknown, not false
     });
   });
 
@@ -336,5 +338,117 @@ describe("toRawTimeEntry", () => {
     }, 99, new Map());
     expect(raw.clientId).toBeUndefined();
     expect(classifyRawEntries([raw], new Set())[0].cls).toBe("billable");
+  });
+});
+
+// ─── Regression: "internal_reclassified_ytd is undercounted" (2026-11-18) ───
+// Reported as a bug: PAR showed 193.4 internal hrs against 901.8 measured, TBS
+// 0 against 92.0. Not a bug — the measurement ignored the Clio non_billable
+// flag, while internal_reclassified counts only BILLABLE-flagged internal hours
+// (the ones the adjustment has to move). The shortfall was exactly the internal
+// time each timekeeper had already flagged non-billable. Live Clio figures,
+// 2026-01-01..2026-11-15, are the fixtures. internal_total_ytd now reports the
+// flag-agnostic number so the two can't be confused again.
+describe("internal total vs reclassified — live PAR / TBS fixtures", () => {
+  const OTHER = 2028032059; // an ordinary client
+  let nextId = 1000;
+  const e = (over: Partial<RawTimeEntry>): RawTimeEntry =>
+    entry({ id: nextId++, ...over });
+  const firm = (hours: number, over: Partial<RawTimeEntry> = {}) =>
+    e({ hours, rate: 0, amount: 0, clientId: FIRM_SELF_CLIENT_ID, ...over });
+
+  it("TBS: all 92.0 internal hrs self-flagged non-billable → reclassified 0, total 92.0", () => {
+    const raw = [
+      firm(35.2, { nonBillableFlag: true, rate: 375, amount: 225 }), // 02888-Admin (some rated)
+      firm(23.8, { nonBillableFlag: true }),                         // 00706-Business Development
+      firm(17.2, { nonBillableFlag: true }),                         // 00050-Potential Clients
+      firm(14.4, { nonBillableFlag: true }),                         // 00707-CLE
+      e({ hours: 1.4, rate: 0, amount: 0, clientId: OTHER, nonBillableFlag: true }), // 02653-Lopez $0/$0
+      e({ hours: 1339.0, rate: 375, amount: 502125, clientId: OTHER }), // billable client work
+    ];
+    const t = sumTotals(classifyRawEntries(raw, new Set()));
+    expect(t.internalHours).toBeCloseTo(0, 6);
+    expect(t.firmSelfClientHours).toBeCloseTo(0, 6);
+    expect(t.zeroValueHours).toBeCloseTo(0, 6);
+    expect(t.internalTotalHours).toBeCloseTo(92.0, 6);
+    expect(t.internalSelfFlaggedHours).toBeCloseTo(92.0, 6);
+    // Net and raw both 1339.0: flagged time was never in raw.
+    expect(t.billable).toBeCloseTo(1339.0, 6);
+    expect(t.billableRaw).toBeCloseTo(1339.0, 6);
+    expect(() => assertTotalsReconcile(t, "TBS")).not.toThrow();
+  });
+
+  it("PAR: 901.8 internal = 708.4 self-flagged + 193.4 reclassified", () => {
+    const raw = [
+      firm(535.6, { nonBillableFlag: true }),   // 02888-Admin, flagged
+      firm(108.2, { nonBillableFlag: true }),   // 00050-Potential Clients, flagged
+      firm(64.6, { nonBillableFlag: true }),    // other firm matters, flagged
+      firm(186.8),                              // firm-self, billable-flagged, $0
+      firm(0.2, { rate: 450, amount: 90 }),     // firm-self, billable-flagged, RATED
+      e({ hours: 6.4, rate: 0, amount: 0, clientId: OTHER }), // $0/$0 on a client matter
+      e({ hours: 1842.0, rate: 450, amount: 828900, clientId: OTHER }), // real billable
+    ];
+    const t = sumTotals(classifyRawEntries(raw, new Set()));
+    expect(t.internalHours).toBeCloseTo(193.4, 6);
+    expect(t.firmSelfClientHours).toBeCloseTo(187.0, 6);
+    expect(t.firmSelfClientRatedHours).toBeCloseTo(0.2, 6);
+    expect(t.zeroValueHours).toBeCloseTo(6.4, 6);
+    expect(t.internalSelfFlaggedHours).toBeCloseTo(708.4, 6);
+    expect(t.internalTotalHours).toBeCloseTo(901.8, 6);
+    expect(t.billable).toBeCloseTo(1842.0, 6);
+    expect(t.billableRaw - t.billable).toBeCloseTo(193.4, 6);
+    expect(() => assertTotalsReconcile(t, "PAR")).not.toThrow();
+  });
+
+  it("the flag-agnostic rule ignores the flag; the reclassification rule does not", () => {
+    const flagged = { rate: 0, amount: 0, clientId: FIRM_SELF_CLIENT_ID, nonBillableFlag: true };
+    expect(matchesInternalRuleIgnoringFlag(flagged)).toBe(true);
+    expect(internalReasonFor(flagged)).toBe("firm_self_client"); // rule matches…
+    const [c] = classifyRawEntries([entry({ id: 1, ...flagged })], new Set());
+    expect(c.internal).toBe(false);   // …but there is nothing to move
+    expect(c.internalAny).toBe(true);
+  });
+
+  it("fee placeholders never count as internal on either measure", () => {
+    const [c] = classifyRawEntries([entry({ id: 7, rate: 0, amount: 0 })], new Set([7]));
+    expect(c.cls).toBe("excluded");
+    expect(c.internalAny).toBe(false);
+  });
+
+  it("assertTotalsReconcile throws when the bases drift", () => {
+    const t = sumTotals(classifyRawEntries([firm(4.0)], new Set()));
+    expect(() => assertTotalsReconcile(t, "ok")).not.toThrow();
+    expect(() => assertTotalsReconcile({ ...t, internalHours: t.internalHours - 1 }, "bad")).toThrow(/do not reconcile/);
+    expect(() => assertTotalsReconcile({ ...t, internalTotalHours: t.internalTotalHours + 1 }, "bad")).toThrow(/do not reconcile/);
+  });
+});
+
+describe("contingency hours", () => {
+  it("counts all worked hours on contingency matters, billable subset separately, placeholders excluded", () => {
+    const raw: RawTimeEntry[] = [
+      entry({ id: 1, hours: 5.0, contingency: true }),                         // billable
+      entry({ id: 2, hours: 1.5, contingency: true, nonBillableFlag: true }),  // nonbillable
+      entry({ id: 3, hours: 1.0, contingency: true, rate: 25000, amount: 25000 }), // fee placeholder
+      entry({ id: 4, hours: 2.0, contingency: true, clientId: FIRM_SELF_CLIENT_ID }), // e.g. 02671-Anike: reclassified
+      entry({ id: 5, hours: 9.0, contingency: false }),                        // hourly matter
+    ];
+    const t = sumTotals(classifyRawEntries(raw, new Set([3])));
+    expect(t.contingencyHours).toBeCloseTo(8.5, 6);        // 5.0 + 1.5 + 2.0
+    expect(t.contingencyBillableHours).toBeCloseTo(5.0, 6);
+  });
+
+  it("an unknown contingency status stays null, never false", () => {
+    const [c] = classifyRawEntries([entry({ id: 1 })], new Set());
+    expect(c.contingency).toBeNull();
+    const t = sumTotals([c]);
+    expect(t.contingencyHours).toBe(0);
+  });
+
+  it("toRawTimeEntry tags contingency from the matter set, null when the lookup failed", () => {
+    const act = { id: 1, date: "2026-03-05", rounded_quantity: 3600, price: 450, total: 450,
+      non_billable: false, matter: { id: 1799152610 }, user: { id: 344117381, name: "Paul Romano" } };
+    expect(toRawTimeEntry(act, 0, undefined, new Set([1799152610])).contingency).toBe(true);
+    expect(toRawTimeEntry(act, 0, undefined, new Set([42])).contingency).toBe(false);
+    expect(toRawTimeEntry(act, 0, undefined, null).contingency).toBeNull();
   });
 });

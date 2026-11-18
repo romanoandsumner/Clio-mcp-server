@@ -68,7 +68,7 @@
 // ============================================================
 import { fetchAllPages, rawGetSingle } from "../clio/pagination";
 import {
-  standardRateByUser, isFeePlaceholderRate, matterQualifiesForStrip,
+  standardRateByUser, isFeePlaceholderRate, matterQualifiesForStrip, isContingencyMatter,
 } from "./excludedHours";
 
 /**
@@ -97,6 +97,19 @@ export type ClassifiedTimeEntry = {
   internalReason?: "firm_self_client" | "zero_rate_and_amount";
   /** True when a reclassified entry carried money — see firmSelfClientRatedHours. */
   internalRated?: boolean;
+  /**
+   * True when the entry meets EITHER internal rule — firm-self client, or rate 0
+   * AND amount 0 — REGARDLESS of its Clio non_billable flag. `internal` is the
+   * subset the adjustment had to move (raw-billable); the rest were already
+   * flagged non-billable by the timekeeper. Always false for fee placeholders.
+   */
+  internalAny: boolean;
+  /**
+   * True when the entry's matter has the "Contingency" custom field checked.
+   * null when the contingency lookup was not run or failed — never a silent
+   * false, so a broken lookup can't report 0 contingency hours.
+   */
+  contingency: boolean | null;
 };
 
 // Raw shape the pure classifier consumes (one row per /activities TimeEntry).
@@ -115,6 +128,8 @@ export type RawTimeEntry = {
   /** The matter's client contact id. Feeds internal rule (a). */
   clientId?: number;
   nonBillableFlag: boolean;
+  /** Matter is contingency-flagged; null = unknown (lookup not run / failed). */
+  contingency?: boolean | null;
 };
 
 /** Field list an /activities pull needs to feed this classifier. */
@@ -165,6 +180,17 @@ export function internalReasonFor(
 }
 
 /**
+ * Internal by EITHER rule, ignoring the non_billable flag — the population a
+ * person measuring "all internal time" counts. Compare internalReasonFor, which
+ * only fires on billable-flagged entries because only those need moving.
+ */
+export function matchesInternalRuleIgnoringFlag(
+  e: Pick<RawTimeEntry, "rate" | "amount" | "clientId">,
+): boolean {
+  return isFirmSelfClient(e.clientId) || (e.rate === 0 && e.amount === 0);
+}
+
+/**
  * Pure classification, producing both bases in one pass.
  *
  * Precedence: the non_billable flag wins over everything (a flagged entry must
@@ -194,6 +220,8 @@ export function classifyRawEntries(
       internal: reason !== undefined,
       internalReason: reason,
       internalRated: reason !== undefined && (e.rate > 0 || e.amount > 0),
+      internalAny: excludeInternal && clsRaw !== "excluded" && matchesInternalRuleIgnoringFlag(e),
+      contingency: e.contingency ?? null,
     };
   });
 }
@@ -221,13 +249,26 @@ export type HoursTotals = {
   firmSelfClientRatedHours: number;
   /** Internal hours caught by rule (b) — $0 rate AND $0 amount. */
   zeroValueHours: number;
+  /**
+   * ALL hours meeting either internal rule, regardless of the Clio flag.
+   * Always equals internalHours + internalSelfFlaggedHours (asserted by
+   * assertTotalsReconcile).
+   */
+  internalTotalHours: number;
+  /** Internal-rule hours the timekeeper already flagged non-billable in Clio. */
+  internalSelfFlaggedHours: number;
+  /** Worked hours (billable + nonbillable, adjusted basis) on contingency matters. */
+  contingencyHours: number;
+  /** Subset of contingencyHours that is billable on the adjusted basis. */
+  contingencyBillableHours: number;
 };
 
 export function emptyTotals(): HoursTotals {
   return {
     billable: 0, billableRaw: 0, nonbillable: 0, nonbillableRaw: 0,
     internalHours: 0, firmSelfClientHours: 0, firmSelfClientRatedHours: 0,
-    zeroValueHours: 0,
+    zeroValueHours: 0, internalTotalHours: 0, internalSelfFlaggedHours: 0,
+    contingencyHours: 0, contingencyBillableHours: 0,
   };
 }
 
@@ -243,6 +284,33 @@ export function addToTotals(t: HoursTotals, e: ClassifiedTimeEntry): void {
       t.firmSelfClientHours += e.hours;
       if (e.internalRated) t.firmSelfClientRatedHours += e.hours;
     } else t.zeroValueHours += e.hours;
+  }
+  // Counted independently of `internal` (from the flag-agnostic rule + clsRaw),
+  // so the reconciliation below is a real cross-check, not a tautology.
+  if (e.internalAny) {
+    t.internalTotalHours += e.hours;
+    if (e.clsRaw === "nonbillable") t.internalSelfFlaggedHours += e.hours;
+  }
+  if (e.contingency === true && e.cls !== "excluded") {
+    t.contingencyHours += e.hours;
+    if (e.cls === "billable") t.contingencyBillableHours += e.hours;
+  }
+}
+
+/**
+ * Fail loudly if the bases stop reconciling. Two identities must hold:
+ *   billableRaw − billable            == internalHours
+ *   internalTotalHours                == internalHours + internalSelfFlaggedHours
+ * A drift here means a classification bug, and the numbers must not ship.
+ */
+export function assertTotalsReconcile(t: HoursTotals, label: string, tol = 0.05): void {
+  const d1 = (t.billableRaw - t.billable) - t.internalHours;
+  const d2 = t.internalTotalHours - (t.internalHours + t.internalSelfFlaggedHours);
+  if (Math.abs(d1) > tol || Math.abs(d2) > tol) {
+    throw new Error(
+      `[Goals] hours do not reconcile for ${label}: raw−net−reclassified=${d1.toFixed(2)}, ` +
+      `internalTotal−(reclassified+selfFlagged)=${d2.toFixed(2)}`,
+    );
   }
 }
 
@@ -324,11 +392,35 @@ export async function buildMatterClientMap(): Promise<Map<number, number>> {
   return map;
 }
 
+/**
+ * Ids of every matter (any status) whose "Contingency" custom field is checked —
+ * the firm's source of truth for contingency (billing_method mislabels these
+ * "hourly"). One paginated /matters pull with custom_field_values expanded;
+ * Clio has no server-side custom-field filter.
+ *
+ * Returns null on failure so callers report contingency as UNAVAILABLE rather
+ * than as 0 hours.
+ */
+export async function buildContingencyMatterSet(): Promise<Set<number> | null> {
+  try {
+    const matters = await fetchAllPages<any>("/matters", {
+      fields: "id,custom_field_values{id,field_name,value}",
+    });
+    const set = new Set<number>();
+    for (const m of matters) if (typeof m?.id === "number" && isContingencyMatter(m)) set.add(m.id);
+    return set;
+  } catch (e: any) {
+    console.warn(`[Goals] contingency matter pull failed (${e?.message ?? e}); contingency hours reported as unavailable`);
+    return null;
+  }
+}
+
 /** Map one Clio /activities TimeEntry row onto the classifier's input shape. */
 export function toRawTimeEntry(
   a: any,
   fallbackUid: number,
   clientByMatter?: Map<number, number>,
+  contingencyMatters?: Set<number> | null,
 ): RawTimeEntry {
   const matterId = a.matter?.id;
   return {
@@ -342,6 +434,9 @@ export function toRawTimeEntry(
     matterId,
     clientId: matterId !== undefined ? clientByMatter?.get(matterId) : undefined,
     nonBillableFlag: a.non_billable === true,
+    contingency: contingencyMatters
+      ? (matterId !== undefined && contingencyMatters.has(matterId))
+      : null,
   };
 }
 
@@ -357,6 +452,8 @@ export async function classifyYtdTimeEntries(opts: {
   userIds: number[];
   /** Apply the firm-internal reclassification. Defaults to TRUE. */
   excludeInternal?: boolean;
+  /** Tag entries on Contingency-flagged matters (one extra /matters pull). Default false. */
+  withContingency?: boolean;
 }): Promise<ClassifiedTimeEntry[]> {
   const startDate = `${opts.year}-01-01`;
   const excludeInternal = opts.excludeInternal !== false;
@@ -364,6 +461,7 @@ export async function classifyYtdTimeEntries(opts: {
   // Only needed for rule (a); skipped entirely on the legacy raw path so
   // exclude_internal=false costs exactly what it did before.
   const clientByMatter = excludeInternal ? await buildMatterClientMap() : undefined;
+  const contingencyMatters = opts.withContingency ? await buildContingencyMatterSet() : null;
 
   const raw: RawTimeEntry[] = [];
   for (const userId of opts.userIds) {
@@ -381,7 +479,7 @@ export async function classifyYtdTimeEntries(opts: {
     }
     for (const a of acts) {
       if (!a?.date || a.date < startDate || a.date > opts.endDate) continue;
-      raw.push(toRawTimeEntry(a, userId, clientByMatter));
+      raw.push(toRawTimeEntry(a, userId, clientByMatter, contingencyMatters));
     }
   }
 
