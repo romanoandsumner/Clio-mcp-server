@@ -65,7 +65,7 @@ export async function buildWorkedHoursSplitByMonth(
   year: number,
   month: number,
   roster: RosterMember[],
-  opts: { months?: number[]; excludeInternal?: boolean } = {},
+  opts: { months?: number[]; excludeInternal?: boolean; retryDelayMs?: number } = {},
 ): Promise<WorkedHoursSplit> {
   const months = new Set(opts.months ?? Array.from({ length: month }, (_, i) => i + 1));
   const maxMonth = Math.max(...months);
@@ -85,20 +85,20 @@ export async function buildWorkedHoursSplitByMonth(
   };
 
   for (const r of roster) {
-    let acts: any[] = [];
-    try {
-      acts = await fetchAllPages<any>("/activities", {
-        type: "TimeEntry",
-        // price/total/matter{id} feed the internal reclassification only — the
-        // flag still decides the raw split.
-        fields: "id,date,quantity,rounded_quantity,price,total,non_billable,matter{id},user{id}",
-        user_id: r.user_id,
-        created_since: `${year}-01-01T00:00:00+00:00`,
-      });
-    } catch (e: any) {
-      console.warn(`[Dashboard] worked-hours pull failed for ${r.initials}: ${e?.message ?? e}`);
-      continue;
-    }
+    // A failed pull must NOT be skipped. It used to `continue`, which wrote
+    // 0 billable / 0 nonbillable for that person into 26 Compare's FROZEN
+    // monthly snapshot while the run still reported success — PAR's September
+    // 2026 sat at 0/0 (he worked 259.6 hrs) until a manual re-run. Retry
+    // transient failures, then fail the whole run: an aborted run writes
+    // nothing and can simply be re-run; a silent zero persists.
+    const acts = await pullWithRetry(() => fetchAllPages<any>("/activities", {
+      type: "TimeEntry",
+      // price/total/matter{id} feed the internal reclassification only — the
+      // flag still decides the raw split.
+      fields: "id,date,quantity,rounded_quantity,price,total,non_billable,matter{id},user{id}",
+      user_id: r.user_id,
+      created_since: `${year}-01-01T00:00:00+00:00`,
+    }), r.initials, opts.retryDelayMs ?? 3000);
     for (const a of acts) {
       if (a.date < `${year}-01-01` || a.date > monthEnd) continue;
       const m = parseInt(String(a.date).slice(5, 7), 10);
@@ -123,6 +123,28 @@ export async function buildWorkedHoursSplitByMonth(
     }
   }
   return { total, billable, nonbillable, billableRaw, nonbillableRaw, internal };
+}
+
+/** Attempts per timekeeper before the worked-hours pull fails the run. */
+export const WORKED_HOURS_PULL_ATTEMPTS = 3;
+
+/**
+ * Run one timekeeper's /activities pull, retrying with linear backoff. Throws
+ * after the last attempt, naming the timekeeper, so the dashboard job errors
+ * out instead of writing zeros.
+ */
+export async function pullWithRetry<T>(pull: () => Promise<T>, initials: string, delayMs: number): Promise<T> {
+  let last: any;
+  for (let attempt = 1; attempt <= WORKED_HOURS_PULL_ATTEMPTS; attempt++) {
+    try {
+      return await pull();
+    } catch (e: any) {
+      last = e;
+      console.warn(`[Dashboard] worked-hours pull failed for ${initials} (attempt ${attempt}/${WORKED_HOURS_PULL_ATTEMPTS}): ${e?.message ?? e}`);
+      if (attempt < WORKED_HOURS_PULL_ATTEMPTS) await new Promise((res) => setTimeout(res, delayMs * attempt));
+    }
+  }
+  throw new Error(`worked-hours pull failed for ${initials} after ${WORKED_HOURS_PULL_ATTEMPTS} attempts (${last?.message ?? last}); nothing was written — re-run the dashboard update`);
 }
 
 /**
