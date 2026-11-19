@@ -1,12 +1,12 @@
 import { z } from "zod/v4";
 import { buildRevenueByMonth } from "../dashboard/revenue";
-import { computeBonusData, reconcileBonusConfig, applyMatterSplits, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG, BONUS_MATTER_SPLITS } from "../dashboard/bonus";
+import { computeBonusData, reconcileBonusConfig, applyMatterSplits, holdOutContingency, FIRM_BONUS_ATTORNEYS, MNH_SPLIT_AMONG, BONUS_MATTER_SPLITS } from "../dashboard/bonus";
 import { buildNonbillableByMonth } from "../dashboard/nonbillable";
-import { buildMonthlyCollections } from "../dashboard/collections";
+import { buildMonthlyCollections, aggregateMonthFees } from "../dashboard/collections";
 import { buildMonthlyBilled } from "../dashboard/billed";
 import { buildExcludedHoursByMonth, feePlaceholderKeys } from "../dashboard/excludedHours";
 import {
-  classifyYtdTimeEntries, addToTotals, emptyTotals, assertTotalsReconcile,
+  classifyYtdTimeEntries, addToTotals, emptyTotals, assertTotalsReconcile, buildContingencyMatters,
   type ClassifiedTimeEntry, type HoursTotals,
 } from "../dashboard/classifiedHours";
 import { buildWorkedHoursSplitByMonth } from "../dashboard/workedHours";
@@ -2076,14 +2076,27 @@ export function registerDocumentTools(server: McpServer): void {
           // issue month and dropped prior-year payments (~$326K low). The ExcelJS
           // write loop below AND the surgical compareXml patch both consume these
           // maps; the Bonus Tracker is derived from col N, so it picks these up too.
+          // §4.2 of the 2026 Partner Bonus Plan: contingency-fee collections earn
+          // no bonus (partner or associate) until the Members decide in writing.
+          // The matter list is REQUIRED — without it contingency fees would flow
+          // silently into bonus accruals that drive payroll, so a failed lookup
+          // fails the run (re-runnable) instead.
+          _step = "loading contingency matters (bonus §4.2 hold)";
+          const bonusContingency = await buildContingencyMatters();
+          if (!bonusContingency) {
+            throw new Error("Contingency matter lookup failed; the bonus tabs cannot apply the §4.2 contingency-fee hold. Nothing was written — re-run the dashboard update.");
+          }
           _step = "generating payment-filtered Fee Allocation reports (per YTD month)";
           const {
             indivByMonth: indivCollByMonth, origByMonth: origCollByMonth,
             respByMonth: respCollByMonth,
             nonRosterIndivByMonth: nrbIndivByMonth, nonRosterOrigByMonth: nrbOrigByMonth,
             nonRosterRespByMonth: nrbRespByMonth, indivRespByMonth: indivRespCollByMonth,
+            contingencyIndivByMonth: contingencyCollByMonth,
             firmByMonth: collFirmFeesByMonth, firmYtd: collFirmYtd,
-          } = await buildMonthlyCollections(params.year, params.month, COLL_ROSTER, { months: collMonths });
+          } = await buildMonthlyCollections(params.year, params.month, COLL_ROSTER, {
+            months: collMonths, contingencyPrefixes: bonusContingency.prefixes,
+          });
           console.log(`[Dashboard] FEES-ONLY collections built: firm YTD fees received=$${collFirmYtd.toFixed(2)} (Billed Time Collected; excludes expenses/interest/tax)`);
           // Collections write to: col N=14 "Collected Actual" (working timekeeper),
           // col S=19 "Collected Actual" under Responsible Attorney (responsible-attorney
@@ -2217,7 +2230,7 @@ export function registerDocumentTools(server: McpServer): void {
             configSheet.getRow(18).values = [2, 50000, 0.05];
             configSheet.getRow(19).values = [3, 50000, 0.10];
             configSheet.getRow(20).values = [4, "Unlimited", 0.15];
-            configSheet.getRow(22).values = ["Partner targets per the 9/28/26 memo (Target col, trued up in Dec); credit = sum of own + associate + paralegal individual collections; associates their own only"];
+            configSheet.getRow(22).values = ["2026 Partner Bonus Plan (Unanimous Written Consent, Nov 2026): partner targets per Schedule 1 (Target col, trued up in Dec); credit follows cost = own + team individual collections; associates their own only (target = salary + payroll + overhead share). Contingency-fee collections are held out of every bonus under Plan §4.2 until the Members decide in writing."];
             configSheet.getRow(24).values = ["Paralegal Hours Bonus"];
             configSheet.getRow(24).font = { bold: true };
             configSheet.getRow(25).values = ["Min Hours", "Bonus"];
@@ -2257,12 +2270,46 @@ export function registerDocumentTools(server: McpServer): void {
               if (amt) (splitAmounts[monthNames[Number(m) - 1]] ??= {})[sp.creditKey] = amt;
             }
           }
-          const bonusCollections = applyMatterSplits(monthCollections, BONUS_MATTER_SPLITS, splitAmounts);
+          // §4.2 hold: contingency-matter collections per month and initials. This
+          // run's payment reports cover Jan..params.month; any LATER month that
+          // already has col-N figures (a re-run of a past month) gets its own
+          // report here, so a later contingency fee can never slip through.
+          const contingencyByMonthIni: Record<string, Record<string, number>> = {};
+          const iniByUid = new Map(COLL_ROSTER.map((r) => [r.user_id, r.initials]));
+          const addCont = (m: number, byUid: Record<number, number>) => {
+            for (const [uid, amt] of Object.entries(byUid)) {
+              const ini = iniByUid.get(Number(uid));
+              if (ini && amt) (contingencyByMonthIni[monthNames[m - 1]] ??= {})[ini] = amt;
+            }
+          };
+          for (const [m, byUid] of Object.entries(contingencyCollByMonth)) addCont(Number(m), byUid);
+          for (let m = params.month + 1; m <= 12; m++) {
+            const mc = monthCollections[monthNames[m - 1]];
+            if (!mc || !Object.values(mc).some((v) => v)) continue;
+            _step = `bonus §4.2 hold: payment Fee Allocation for ${monthNames[m - 1]}`;
+            const rows = await genFeeAllocationByMonth(params.year, m);
+            addCont(m, aggregateMonthFees(rows, COLL_ROSTER, bonusContingency.prefixes).contingencyIndiv);
+          }
+          const { net: bonusNetCollections, held: bonusHeldCollections } =
+            holdOutContingency(monthCollections, contingencyByMonthIni);
+          const bonusCollections = applyMatterSplits(bonusNetCollections, BONUS_MATTER_SPLITS, splitAmounts);
 
           // Per-attorney bonus math — pure, extracted to src/dashboard/bonus.ts (unit-tested).
           const bonusData = computeBonusData(bonusCollections, configAttorneys, {
             firmOverhead, numAttorneys, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG,
           });
+          // The held dollars run through the SAME attribution (own + team, splits,
+          // former staff), so each person's "held" figure is exactly what §4.2
+          // kept out of their bonus. Only the YTD total is used.
+          const heldData = computeBonusData(bonusHeldCollections, configAttorneys, {
+            firmOverhead, numAttorneys, brackets: BRACKETS, mnhSplitAmong: MNH_SPLIT_AMONG,
+          });
+          const heldYtd = (ini: string) => {
+            const rows = heldData[ini]?.rows ?? [];
+            return rows.length ? rows[rows.length - 1].ytd : 0;
+          };
+          const bonusContingencyHeld = Object.fromEntries(configAttorneys.map((a) => [a.ini, heldYtd(a.ini)]));
+          console.log(`[Dashboard] bonus §4.2 contingency hold: ${JSON.stringify(bonusContingencyHeld)}`);
 
           _step = "creating Bonus Tracker";
           // ---- CREATE BONUS TRACKER SHEET ----
@@ -3153,7 +3200,7 @@ export function registerDocumentTools(server: McpServer): void {
           configRows.push(xmlRow(18, [xmlCell("A18", 2), xmlCell("B18", 50000, { style: STYLE_CUR }),     xmlCell("C18", 0.05, { style: STYLE_PCT })]));
           configRows.push(xmlRow(19, [xmlCell("A19", 3), xmlCell("B19", 50000, { style: STYLE_CUR }),     xmlCell("C19", 0.10, { style: STYLE_PCT })]));
           configRows.push(xmlRow(20, [xmlCell("A20", 4), xmlCell("B20", "Unlimited"),                     xmlCell("C20", 0.15, { style: STYLE_PCT })]));
-          configRows.push(xmlRow(22, [xmlCell("A22", "Partner targets per the 9/28/26 memo (Target col, trued up in Dec); credit = sum of own + associate + paralegal individual collections; associates their own only")]));
+          configRows.push(xmlRow(22, [xmlCell("A22", "2026 Partner Bonus Plan (Unanimous Written Consent, Nov 2026): partner targets per Schedule 1 (Target col, trued up in Dec); credit follows cost = own + team individual collections; associates their own only (target = salary + payroll + overhead share). Contingency-fee collections are held out of every bonus under Plan §4.2 until the Members decide in writing.")]));
           configRows.push(xmlRow(24, [xmlCell("A24", "Paralegal Hours Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(25, [xmlCell("A25", "Min Hours", { style: STYLE_BOLD }), xmlCell("B25", "Bonus", { style: STYLE_BOLD })]));
           configRows.push(xmlRow(26, [xmlCell("A26", 110), xmlCell("B26", 100, { style: STYLE_CUR })]));
@@ -3239,6 +3286,7 @@ export function registerDocumentTools(server: McpServer): void {
             xmlCell("F20", "Total Bonus",      { style: STYLE_BOLD }),
             xmlCell("G20", "Paid",             { style: STYLE_BOLD }),
             xmlCell("H20", "Balance",          { style: STYLE_BOLD }),
+            xmlCell("I20", "Contingency held (§4.2)", { style: STYLE_BOLD }),
           ]));
           for (let ai = 0; ai < attys.length; ai++) {
             const rn = 21 + ai;
@@ -3256,6 +3304,8 @@ export function registerDocumentTools(server: McpServer): void {
               xmlCell(`F${rn}`, lastActive.cumBonus, { style: STYLE_CUR }),
               xmlCell(`G${rn}`, 0,                   { style: STYLE_CUR }),
               xmlCell(`H${rn}`, lastActive.cumBonus, { style: STYLE_CUR }),
+              // Collections kept OUT of this bonus under Plan §4.2 (contingency fees).
+              xmlCell(`I${rn}`, round2(bonusContingencyHeld[attys[ai].ini] ?? 0), { style: STYLE_CUR }),
             ]));
           }
 
@@ -3461,6 +3511,8 @@ export function registerDocumentTools(server: McpServer): void {
           });
 
           const common = {
+            // Plan §4.2: contingency-fee collections held out of each bonus (YTD $).
+            bonus_contingency_held: bonusContingencyHeld,
             contingency_impact: impactSummary(impactCtx, impactWritten),
             updated_sheet: "26 Compare",
             month: monthName,

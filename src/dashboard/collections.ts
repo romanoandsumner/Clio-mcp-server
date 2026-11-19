@@ -4,6 +4,7 @@
 // the CI-typechecked lib layer.
 // ============================================================
 import { genFeeAllocationByMonth, matchRosterUser, matchRosterResponsible } from "../clio/reportCsv";
+import { matterNumberPrefix } from "./classifiedHours";
 import type { RosterMember } from "../domain/roster";
 
 export type MonthlyCollections = {
@@ -23,6 +24,11 @@ export type MonthlyCollections = {
   // the roster) -> collected fees $. Lets the bonus route one person's collections
   // by matter (see BONUS_MATTER_SPLITS in bonus.ts).
   indivRespByMonth: Record<number, Record<number, Record<number, number>>>;
+  // month -> working-timekeeper user_id -> collected fees $ on CONTINGENCY matters
+  // (a subset of indivByMonth). Held out of every bonus under §4.2 of the 2026
+  // Partner Bonus Plan until the Members decide in writing; 26 Compare's own
+  // collection columns still include them. Empty when no prefixes were passed.
+  contingencyIndivByMonth: Record<number, Record<number, number>>;
   // month -> firm-wide collected fees $ (reconciliation target: Σ col N == Σ col S == Σ col V == this)
   firmByMonth: Record<number, number>;
   // firm-wide YTD total collected fees (reconciliation signal)
@@ -39,6 +45,7 @@ export type MonthFeeAgg = {
   nonRosterOrig: number;                // fees originated by non-roster attorneys (→ NRB col V)
   nonRosterResp: number;                // fees under non-roster responsible attorneys (→ NRB col S)
   indivResp: Record<number, Record<number, number>>; // working timekeeper → responsible attorney (0 = non-roster) → fees
+  contingencyIndiv: Record<number, number>; // working timekeeper → fees on contingency matters (subset of indiv)
   firm: number;                         // firm-wide fees collected (Σ indiv+NRB == Σ orig+NRB == Σ resp+NRB == this)
 };
 
@@ -49,8 +56,12 @@ export type MonthFeeAgg = {
  * attorneys, and non-roster responsible attorneys are pooled so
  * Σ col N (+NRB) == Σ col V (+NRB) == Σ col S (+NRB) == firm fees.
  */
-export function aggregateMonthFees(rows: Record<string, string>[], roster: RosterMember[]): MonthFeeAgg {
-  const agg: MonthFeeAgg = { indiv: {}, orig: {}, resp: {}, nonRosterIndiv: 0, nonRosterOrig: 0, nonRosterResp: 0, indivResp: {}, firm: 0 };
+export function aggregateMonthFees(
+  rows: Record<string, string>[],
+  roster: RosterMember[],
+  contingencyPrefixes?: Set<string>,
+): MonthFeeAgg {
+  const agg: MonthFeeAgg = { indiv: {}, orig: {}, resp: {}, nonRosterIndiv: 0, nonRosterOrig: 0, nonRosterResp: 0, indivResp: {}, contingencyIndiv: {}, firm: 0 };
   for (const r of rows) {
     const collected = collNum(r["Billed Time Collected"]);
     if (!collected) continue;
@@ -67,6 +78,10 @@ export function aggregateMonthFees(rows: Record<string, string>[], roster: Roste
     if (uid != null) {
       const byResp = (agg.indivResp[uid] ??= {});
       byResp[rid ?? 0] = (byResp[rid ?? 0] ?? 0) + collected;
+      const mp = matterNumberPrefix(r["Matter"]);
+      if (contingencyPrefixes && mp !== null && contingencyPrefixes.has(mp)) {
+        agg.contingencyIndiv[uid] = (agg.contingencyIndiv[uid] ?? 0) + collected;
+      }
     }
   }
   return agg;
@@ -91,7 +106,7 @@ export async function buildMonthlyCollections(
   year: number,
   month: number,
   roster: RosterMember[],
-  opts: { months?: number[] } = {},
+  opts: { months?: number[]; contingencyPrefixes?: Set<string> } = {},
 ): Promise<MonthlyCollections> {
   const months = opts.months ?? Array.from({ length: month }, (_, i) => i + 1);
   const indivByMonth: Record<number, Record<number, number>> = {};
@@ -101,22 +116,24 @@ export async function buildMonthlyCollections(
   const nonRosterOrigByMonth: Record<number, number> = {};
   const nonRosterRespByMonth: Record<number, number> = {};
   const indivRespByMonth: Record<number, Record<number, Record<number, number>>> = {};
+  const contingencyIndivByMonth: Record<number, Record<number, number>> = {};
   const firmByMonth: Record<number, number> = {};
   let firmYtd = 0;
   for (const m of months) {
     let feeRows: Record<string, string>[] = [];
     try { feeRows = await genFeeAllocationByMonth(year, m); }
     catch (e: any) { console.warn(`[Dashboard] payment-filtered fee allocation failed for ${year}-${String(m).padStart(2, "0")}: ${e?.message ?? e}`); }
-    const agg = aggregateMonthFees(feeRows, roster);
+    const agg = aggregateMonthFees(feeRows, roster, opts.contingencyPrefixes);
     if (Object.keys(agg.indiv).length) indivByMonth[m] = agg.indiv;
     if (Object.keys(agg.orig).length) origByMonth[m] = agg.orig;
     if (Object.keys(agg.resp).length) respByMonth[m] = agg.resp;
     if (Object.keys(agg.indivResp).length) indivRespByMonth[m] = agg.indivResp;
+    if (Object.keys(agg.contingencyIndiv).length) contingencyIndivByMonth[m] = agg.contingencyIndiv;
     nonRosterIndivByMonth[m] = agg.nonRosterIndiv;
     nonRosterOrigByMonth[m] = agg.nonRosterOrig;
     nonRosterRespByMonth[m] = agg.nonRosterResp;
     firmByMonth[m] = agg.firm;
     firmYtd += agg.firm;
   }
-  return { indivByMonth, origByMonth, respByMonth, nonRosterIndivByMonth, nonRosterOrigByMonth, nonRosterRespByMonth, indivRespByMonth, firmByMonth, firmYtd };
+  return { indivByMonth, origByMonth, respByMonth, nonRosterIndivByMonth, nonRosterOrigByMonth, nonRosterRespByMonth, indivRespByMonth, contingencyIndivByMonth, firmByMonth, firmYtd };
 }
