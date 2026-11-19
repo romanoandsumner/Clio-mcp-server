@@ -89,11 +89,41 @@ export function parseKeyValues(body: string | null | undefined): Record<string, 
   return out;
 }
 
-function validIso(s: string | undefined | null): string | null {
+/**
+ * Read a timestamp from a note line. An ISO-8601 value WITH an offset (or Z) is
+ * taken as written. A time WITHOUT one is what a person types into Grow
+ * ("2026-11-19 10:32 AM", "11/19/2026 10:32", "2026-11-19T10:32") and is read
+ * as Central wall-clock time: the server runs in UTC, so Date.parse would put
+ * it six hours off. Anything else is null, and the caller falls back to the
+ * note's own created_at.
+ */
+export function parseNoteTime(s: string | undefined | null): string | null {
   if (!s) return null;
-  const t = Date.parse(s);
-  return Number.isNaN(t) ? null : new Date(t).toISOString();
+  const v = s.trim();
+  if (/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/i.test(v)) {
+    const t = Date.parse(v);
+    return Number.isNaN(t) ? null : new Date(t).toISOString();
+  }
+  const m =
+    v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T]+(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)?$/) ??
+    v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp]\.?[Mm]\.?)?$/);
+  if (!m) return null;
+  let y: number, mo: number, d: number;
+  if (m[0].includes("/")) [mo, d, y] = [+m[1], +m[2], +m[3]];
+  else [y, mo, d] = [+m[1], +m[2], +m[3]];
+  let h = +m[4];
+  const mi = +m[5];
+  const ampm = m[6]?.toLowerCase().replace(/\./g, "");
+  if (ampm) {
+    if (h < 1 || h > 12) return null;
+    if (ampm === "pm" && h !== 12) h += 12;
+    if (ampm === "am" && h === 12) h = 0;
+  }
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return null;
+  return new Date(chicagoToUtc(y, mo, d, h) + mi * 60000).toISOString();
 }
+
+const validIso = parseNoteTime;
 
 /**
  * Extract the structured intake notes. When a subject appears more than once,

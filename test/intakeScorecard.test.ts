@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  parseNoteTime,
   businessMinutesBetween,
   chicagoDate,
   computeIntakeScorecard,
@@ -165,5 +166,27 @@ describe("computeIntakeScorecard", () => {
     });
     expect(c.speed_to_lead.all_business_minutes.median).toBeNull();
     expect(c.warnings[0]).toMatch(/Notes were not read/);
+  });
+});
+
+describe("parseNoteTime (what staff type into a Grow note)", () => {
+  it("takes ISO with an offset as written", () => {
+    expect(parseNoteTime("2026-11-19T10:32:00-06:00")).toBe("2026-11-19T16:32:00.000Z");
+    expect(parseNoteTime("2026-11-19T16:32:00Z")).toBe("2026-11-19T16:32:00.000Z");
+  });
+  it("reads a time without an offset as Central (CST in November)", () => {
+    expect(parseNoteTime("2026-11-19 10:32 AM")).toBe("2026-11-19T16:32:00.000Z");
+    expect(parseNoteTime("2026-11-19 2:05 pm")).toBe("2026-11-19T20:05:00.000Z");
+    expect(parseNoteTime("11/19/2026 10:32 AM")).toBe("2026-11-19T16:32:00.000Z");
+    expect(parseNoteTime("2026-11-19T10:32")).toBe("2026-11-19T16:32:00.000Z");
+    expect(parseNoteTime("2026-11-19 12:15 AM")).toBe("2026-11-19T06:15:00.000Z");
+  });
+  it("uses CDT in summer", () => {
+    expect(parseNoteTime("2026-07-15 9:00 AM")).toBe("2026-07-15T14:00:00.000Z");
+  });
+  it("returns null for anything it cannot read, so the note's own time is used", () => {
+    expect(parseNoteTime("this morning")).toBeNull();
+    expect(parseNoteTime("2026-11-19 13:00 PM")).toBeNull();
+    expect(parseNoteTime("10:32 AM")).toBeNull();
   });
 });
