@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { growFetchAllPages } from "../clio/grow";
+import { growFetchAllPages, growGetSingle } from "../clio/grow";
 
 // Intake scorecard: speed to lead, funnel stage timing, cohort conversion and
 // pipeline hygiene, computed from Clio Grow.
@@ -56,6 +56,7 @@ export interface GrowMatterRow {
   hired_date?: string | null;
   first_letter_sent_date?: string | null;
   first_appointment_created_at?: string | null;
+  inbox_lead_id?: number | null;
   status?: string | null;
   status_category?: string | null;
   type?: string | null;
@@ -269,6 +270,13 @@ export interface ScorecardOptions {
   /** Matter ids whose notes were read (notes absent for others ≠ "no notes"). */
   notesRead?: Set<number>;
   staleListLimit?: number;
+  /**
+   * Grow inbox leads by id (log-a-lead submits every non-CIS call as one).
+   * A matter accepted from a lead, with no [Lead Received] note, takes the
+   * lead's created_at as its arrival time and its marketing source as its
+   * source. Grow sets created_at, so it cannot be backdated.
+   */
+  leadsById?: Map<number, { created_at?: string | null; marketing_source?: { name?: string | null } | null }>;
 }
 
 const DAY = 24 * 3600 * 1000;
@@ -288,6 +296,7 @@ export function computeIntakeScorecard(
   let withLeadNote = 0;
   let withContactNote = 0;
   let withinSla = 0;
+  let leadFallbacks = 0;
   let withinGoal = 0;
   const goal = opts.goalBusinessMinutes ?? 15;
   const floor = opts.hardFloorBusinessMinutes ?? 120;
@@ -303,6 +312,15 @@ export function computeIntakeScorecard(
   for (const m of matters) {
     if (!notesRead.has(m.id)) continue;
     const p = parseIntakeNotes(notesByMatter.get(m.id) ?? []);
+    const lead = m.inbox_lead_id != null ? opts.leadsById?.get(m.inbox_lead_id) : undefined;
+    if (lead) {
+      if (!p.received_at && lead.created_at) {
+        p.received_at = parseNoteTime(lead.created_at);
+        p.channel ??= "inbox-lead";
+        leadFallbacks++;
+      }
+      if (!p.source && lead.marketing_source?.name) p.source = lead.marketing_source.name;
+    }
     parsed.set(m.id, p);
     if (p.received_at) withLeadNote++;
     if (p.contacted_at) withContactNote++;
@@ -455,6 +473,7 @@ export function computeIntakeScorecard(
     matters: matters.length,
     notes_read_for: notesN,
     lead_received_logged: { n: withLeadNote, of: notesN, pct: pct(withLeadNote, notesN) },
+    lead_received_from_inbox_lead: leadFallbacks,
     first_contact_logged: { n: withContactNote, of: notesN, pct: pct(withContactNote, notesN) },
     consult_booked_in_grow: {
       n: matters.filter((m) => m.first_appointment_created_at).length,
@@ -633,7 +652,21 @@ export function registerIntakeScorecardTools(server: McpServer): void {
           });
         }
 
+        // Arrival time for matters accepted from a Grow inbox lead (log-a-lead).
+        const leadsById = new Map<number, any>();
+        const leadIds = [...new Set(matters.filter((m) => notesRead.has(m.id) && m.inbox_lead_id != null).map((m) => m.inbox_lead_id!))];
+        let leadErrors = 0;
+        await mapLimit(leadIds, 5, async (id) => {
+          try {
+            const res = await growGetSingle(`/inbox_leads/${id}`);
+            leadsById.set(id, res?.data ?? res);
+          } catch {
+            leadErrors++;
+          }
+        });
+
         const card = computeIntakeScorecard(matters, notesByMatter, {
+          leadsById,
           asOf,
           maturityDays: args.maturity_days ?? 60,
           staleDays: args.stale_days ?? 14,
@@ -647,6 +680,10 @@ export function registerIntakeScorecardTools(server: McpServer): void {
         if (notesTruncated)
           card.warnings.push(
             `Notes read for the newest ${args.max_notes_matters ?? 250} matters only; speed and source metrics exclude older ones.`
+          );
+        if (leadErrors)
+          card.warnings.push(
+            `${leadErrors} inbox leads could not be read (a lead another app submitted needs grow_lead_inbox_all_read; reconnect at /grow/oauth/start). Their arrival time falls back to notes only.`
           );
         if (noteErrors.length)
           card.warnings.push(`Notes could not be read for ${noteErrors.length} matters (ids: ${noteErrors.slice(0, 10).join(", ")}).`);

@@ -221,3 +221,34 @@ describe("standard, goal and hard floor", () => {
     ]);
   });
 });
+
+describe("matters accepted from a log-a-lead inbox lead", () => {
+  const card = computeIntakeScorecard(
+    [
+      { id: 1, created_at: "2026-11-19T17:00:00Z", updated_at: "2026-11-19T17:00:00Z", status_category: "intake", inbox_lead_id: 77 },
+      { id: 2, created_at: "2026-11-19T17:00:00Z", updated_at: "2026-11-19T17:00:00Z", status_category: "intake", inbox_lead_id: 78 },
+    ] as any,
+    new Map([
+      // Matter 1: no [Lead Received] note; the lead's created_at is the arrival time.
+      [1, [{ subject: "[First Contact]", body: "contacted_at: 2026-11-19T10:20:00-06:00", created_at: "2026-11-19T16:21:00Z" }]],
+      // Matter 2: a [Lead Received] note wins over the lead.
+      [2, [{ subject: "[Lead Received]", body: "received_at: 2026-11-19T09:00:00-06:00\nsource: Referral", created_at: "2026-11-19T15:01:00Z" },
+           { subject: "[First Contact]", body: "contacted_at: 2026-11-19T09:05:00-06:00", created_at: "2026-11-19T15:06:00Z" }]],
+    ]) as any,
+    {
+      asOf: "2026-11-19T18:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30,
+      leadsById: new Map([
+        [77, { created_at: "2026-11-19T16:02:00Z", marketing_source: { name: "Google - Local Services Ads" } }],
+        [78, { created_at: "2026-11-19T16:30:00Z", marketing_source: { name: "Internet" } }],
+      ]),
+    }
+  );
+  it("times speed to lead from the lead when no note exists, and prefers the note when one does", () => {
+    expect(card.speed_to_lead.all_business_minutes.n).toBe(2);
+    expect([...card.speed_to_lead.all_business_minutes.median !== null ? [card.speed_to_lead.all_business_minutes.median] : []]).toEqual([11.5]);
+    expect(card.coverage.lead_received_from_inbox_lead).toBe(1);
+  });
+  it("takes the source from the lead's marketing source only when the note has none", () => {
+    expect(card.conversion.by_source.map((s) => s.key).sort()).toEqual(["Google - Local Services Ads", "Referral"]);
+  });
+});
