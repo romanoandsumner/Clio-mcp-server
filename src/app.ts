@@ -37,6 +37,7 @@ import { registerVersionTools } from "./tools/version";
 import { registerWhoAmITools } from "./tools/whoami";
 import { registerNoteTools } from "./tools/notes";
 import { registerGrowTools } from "./tools/grow";
+import { registerIntakeScorecardTools } from "./tools/intakeScorecard";
 import { registerClioDocumentTools } from "./tools/clioDocuments";
 import { registerReminderTools } from "./tools/reminders";
 import { registerTimerTools } from "./tools/timers";
@@ -116,6 +117,7 @@ function buildToolRegistrations(profile: ToolProfile): ToolRegistration[] {
   registerWhoAmITools(recorder);
   registerNoteTools(recorder);
   registerGrowTools(recorder);
+  registerIntakeScorecardTools(recorder);
   registerClioDocumentTools(recorder);
   registerReminderTools(recorder);
   registerTimerTools(recorder);
