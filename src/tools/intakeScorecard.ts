@@ -277,6 +277,15 @@ export interface ScorecardOptions {
    * source. Grow sets created_at, so it cannot be backdated.
    */
   leadsById?: Map<number, { created_at?: string | null; marketing_source?: { name?: string | null } | null }>;
+  /**
+   * Inbox leads created in the window that never became a matter: untriaged
+   * (still waiting) and ignored (dismissed). Without these, a lead nobody
+   * accepted is invisible to a matter-based scorecard.
+   */
+  inboxLeads?: {
+    untriaged: Array<{ id: number; first_name?: string | null; last_name?: string | null; created_at: string }>;
+    ignored: Array<{ id: number; created_at: string }>;
+  };
 }
 
 const DAY = 24 * 3600 * 1000;
@@ -557,6 +566,29 @@ export function computeIntakeScorecard(
         .map(([k, r]) => ({ key: k, ...r, hire_rate_of_decided_pct: pct(r.hired, r.hired + r.declined) })),
       loss_reasons: lossReasons,
     },
+    inbox: (() => {
+      if (!opts.inboxLeads) return null;
+      const accepted = new Set(matters.map((m) => m.inbox_lead_id).filter((x): x is number => x != null)).size;
+      const waiting = opts.inboxLeads.untriaged
+        .map((l) => ({
+          id: l.id,
+          name: `${l.first_name ?? ""} ${l.last_name ?? ""}`.trim() || null,
+          created_at: l.created_at,
+          business_minutes_waiting: businessMinutesBetween(l.created_at, opts.asOf),
+        }))
+        .sort((a, b) => b.business_minutes_waiting - a.business_minutes_waiting);
+      const ignored = opts.inboxLeads.ignored.length;
+      const total = accepted + waiting.length + ignored;
+      return {
+        leads_in_window: total,
+        accepted_into_a_matter: accepted,
+        still_waiting: waiting.length,
+        dismissed: ignored,
+        dismissed_pct: pct(ignored, total),
+        waiting,
+        past_hard_floor_waiting: waiting.filter((w) => w.business_minutes_waiting > floor).length,
+      };
+    })(),
     hygiene: {
       open: open.length,
       open_by_status: byStatusOpen,
@@ -665,8 +697,21 @@ export function registerIntakeScorecardTools(server: McpServer): void {
           }
         });
 
+        // Leads that never became a matter (untriaged = still waiting, ignored = dismissed).
+        let inboxLeads: ScorecardOptions["inboxLeads"];
+        try {
+          const [untriaged, ignored] = await Promise.all([
+            growFetchAllPages<any>("/inbox_leads", { state: "untriaged", created_since: args.created_since }, 500),
+            growFetchAllPages<any>("/inbox_leads", { state: "ignored", created_since: args.created_since }, 500),
+          ]);
+          inboxLeads = { untriaged, ignored };
+        } catch {
+          inboxLeads = undefined;
+        }
+
         const card = computeIntakeScorecard(matters, notesByMatter, {
           leadsById,
+          inboxLeads,
           asOf,
           maturityDays: args.maturity_days ?? 60,
           staleDays: args.stale_days ?? 14,
@@ -681,6 +726,8 @@ export function registerIntakeScorecardTools(server: McpServer): void {
           card.warnings.push(
             `Notes read for the newest ${args.max_notes_matters ?? 250} matters only; speed and source metrics exclude older ones.`
           );
+        if (!inboxLeads)
+          card.warnings.push("Inbox leads could not be read: leads that never became a matter are not counted.");
         if (leadErrors)
           card.warnings.push(
             `${leadErrors} inbox leads could not be read (a lead another app submitted needs grow_lead_inbox_all_read; reconnect at /grow/oauth/start). Their arrival time falls back to notes only.`

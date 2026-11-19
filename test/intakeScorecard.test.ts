@@ -252,3 +252,30 @@ describe("matters accepted from a log-a-lead inbox lead", () => {
     expect(card.conversion.by_source.map((s) => s.key).sort()).toEqual(["Google - Local Services Ads", "Referral"]);
   });
 });
+
+describe("inbox leads that never became a matter", () => {
+  const card = computeIntakeScorecard(
+    [{ id: 1, created_at: "2026-11-19T15:00:00Z", updated_at: "2026-11-19T15:00:00Z", status_category: "intake", inbox_lead_id: 10 }] as any,
+    new Map(),
+    {
+      asOf: "2026-11-19T20:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30,
+      inboxLeads: {
+        // 10:00 and 13:30 CST; as of 14:00 CST.
+        untriaged: [
+          { id: 11, first_name: "A", last_name: "B", created_at: "2026-11-19T16:00:00Z" },
+          { id: 12, first_name: "C", last_name: "D", created_at: "2026-11-19T19:30:00Z" },
+        ],
+        ignored: [{ id: 13, created_at: "2026-11-19T16:00:00Z" }],
+      },
+    }
+  );
+  it("counts accepted, waiting and dismissed leads, oldest waiting first", () => {
+    expect(card.inbox).toMatchObject({ leads_in_window: 4, accepted_into_a_matter: 1, still_waiting: 2, dismissed: 1, dismissed_pct: 25 });
+    expect(card.inbox!.waiting.map((w) => [w.id, w.business_minutes_waiting])).toEqual([[11, 240], [12, 30]]);
+    expect(card.inbox!.past_hard_floor_waiting).toBe(1);
+  });
+  it("is null, not zero, when inbox leads were not read", () => {
+    const c = computeIntakeScorecard([], new Map(), { asOf: "2026-11-19T20:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30 });
+    expect(c.inbox).toBeNull();
+  });
+});
