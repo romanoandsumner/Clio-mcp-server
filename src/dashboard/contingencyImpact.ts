@@ -315,9 +315,16 @@ export function collectUtilImpact(
   for (const m of months) {
     const abbr = MONTH_ABBRS[m - 1];
     const billable = readTabColumnByUid(utilXml, abbr, sharedStrings, ["C", "D"], "C", initialsToUid, aliases);
+    const nonbillable = readTabColumnByUid(utilXml, abbr, sharedStrings, ["C", "D"], "D", initialsToUid, aliases);
     const avail = readTabColumnByUid(utilXml, abbr, sharedStrings, ["C", "D"], "F", initialsToUid, aliases);
     for (const [uidStr, b] of Object.entries(billable)) {
       const uid = Number(uidStr);
+      // No hours at all on the tab = no data for that person-month (the month
+      // isn't snapshotted yet, the person wasn't active, or the snapshot is
+      // missing). Leave it blank rather than write 0%: otherwise its Available
+      // hours drag the YTD rate down. Same active-biller rule (C + D > 0) as the
+      // tab's own Firm Average (appendUtilizationFirmAvg).
+      if (!(b + (nonbillable[uid] ?? 0) > 0)) continue;
       impactCell(ctx.data, m, uid).util = {
         billable: b,
         contingencyBillable: ctx.contBillable[m]?.[uid] ?? 0,
