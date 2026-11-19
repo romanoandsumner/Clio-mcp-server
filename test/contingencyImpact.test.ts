@@ -146,3 +146,31 @@ describe("buildContingencyImpactSheet", () => {
     expect(billableRow![2]).toContain("SUM(");
   });
 });
+
+describe("collectUtilImpact — months with no hours on the Utilization tab", () => {
+  // Live 2026-11-19 run: November not yet snapshotted (all zeros) and PAR's
+  // September snapshot missing (0/0). Both were written as 0% and their
+  // Available hours dragged the YTD rate down. Same active-biller rule as the
+  // tab's Firm Average: C + D > 0, otherwise blank.
+  const str = (ref: string, t: string) => `<c r="${ref}" t="inlineStr"><is><t>${t}</t></is></c>`;
+  const num = (ref: string, v: number) => `<c r="${ref}"><v>${v}</v></c>`;
+  const row = (r: number, ini: string, c: number, d: number, f: number) =>
+    `<row r="${r}">${str(`B${r}`, ini)}${num(`C${r}`, c)}${num(`D${r}`, d)}${num(`E${r}`, c + d)}${num(`F${r}`, f)}</row>`;
+  const xml = `<worksheet><sheetData>${[
+    `<row r="2">${str("A2", "SEP")}${str("B2", "Employee")}</row>`,
+    row(3, "PAR", 0, 0, 156.7),     // missing snapshot
+    row(4, "KES", 132.2, 54.2, 156.7),
+    `<row r="6">${str("A6", "NOV")}${str("B6", "Employee")}</row>`,
+    row(7, "PAR", 0, 0, 156.7),     // month not closed yet
+    row(8, "KES", 0, 0, 156.7),
+  ].join("")}</sheetData></worksheet>`;
+
+  it("leaves 0/0 person-months blank and keeps active ones", () => {
+    const c = ctx();
+    c.contBillable = { 9: { 344117381: 10.4, 344134017: 1.6 }, 11: { 344117381: 1.6 } };
+    collectUtilImpact(c, xml, [9, 11], [], { PAR: 344117381, KES: 344134017 }, {});
+    expect(c.data[9][344117381]?.util).toBeUndefined();
+    expect(c.data[9][344134017].util).toEqual({ billable: 132.2, contingencyBillable: 1.6, available: 156.7 });
+    expect(c.data[11]).toBeUndefined();
+  });
+});
