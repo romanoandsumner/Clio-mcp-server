@@ -263,3 +263,35 @@ export function computeBonusData(
   }
   return bonusData;
 }
+
+/**
+ * §4.2 of the 2026 Partner Bonus Plan (Unanimous Written Consent, Nov 2026): a
+ * fee received on a contingency-fee matter earns NO bonus until the Members
+ * decide in writing how it is treated. The same hold applies to associate
+ * bonuses (NRN, Nov 19 2026). Splits each month's per-initials collections into
+ * the part that counts (`net`) and the contingency part held out (`held`).
+ *
+ * `contingency` is monthName -> initials -> $ collected on contingency matters
+ * (a subset of that person's col-N collections). The held amount is capped at
+ * what the person has that month, so `net + held` always equals the input and
+ * no figure can go negative.
+ */
+export function holdOutContingency(
+  monthCollections: Record<string, Record<string, number>>,
+  contingency: Record<string, Record<string, number>>,
+): { net: Record<string, Record<string, number>>; held: Record<string, Record<string, number>> } {
+  const net: Record<string, Record<string, number>> = {};
+  const held: Record<string, Record<string, number>> = {};
+  for (const [mn, mc] of Object.entries(monthCollections)) {
+    net[mn] = { ...mc };
+    held[mn] = {};
+    for (const [ini, amt] of Object.entries(contingency[mn] ?? {})) {
+      const have = Math.max(0, mc[ini] ?? 0);
+      const h = round2(Math.min(Math.max(0, amt), have));
+      if (!h) continue;
+      net[mn][ini] = round2(have - h);
+      held[mn][ini] = h;
+    }
+  }
+  return { net, held };
+}
