@@ -190,3 +190,34 @@ describe("parseNoteTime (what staff type into a Grow note)", () => {
     expect(parseNoteTime("10:32 AM")).toBeNull();
   });
 });
+
+describe("standard, goal and hard floor", () => {
+  const m = (id: number, created: string) => ({
+    id, created_at: created, updated_at: created, status_category: "intake", client: { full_name: `C${id}` },
+  });
+  const lead = (recv: string, contact?: string) => [
+    { subject: "[Lead Received]", body: `received_at: ${recv}`, created_at: recv },
+    ...(contact ? [{ subject: "[First Contact]", body: `contacted_at: ${contact}`, created_at: contact }] : []),
+  ];
+  // Thu 2026-11-19, CST. 10:00 = 16:00Z.
+  const card = computeIntakeScorecard(
+    [m(1, "2026-11-19T16:00:00Z"), m(2, "2026-11-19T16:00:00Z"), m(3, "2026-11-19T16:00:00Z"), m(4, "2026-11-19T15:00:00Z")] as any,
+    new Map([
+      [1, lead("2026-11-19T16:00:00Z", "2026-11-19T16:10:00Z")], // 10 min
+      [2, lead("2026-11-19T16:00:00Z", "2026-11-19T16:25:00Z")], // 25 min
+      [3, lead("2026-11-19T16:00:00Z", "2026-11-19T18:30:00Z")], // 150 min
+      [4, lead("2026-11-19T15:00:00Z")], // 9:00, not reached, as of 12:00 = 180 min
+    ]) as any,
+    { asOf: "2026-11-19T18:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30, goalBusinessMinutes: 15, hardFloorBusinessMinutes: 120 }
+  );
+  it("reports the 30-minute standard and the 15-minute goal side by side", () => {
+    expect(card.speed_to_lead.within_sla).toEqual({ n: 2, of: 3, pct: 66.7 });
+    expect(card.speed_to_lead.within_goal).toEqual({ n: 1, of: 3, pct: 33.3 });
+  });
+  it("names every lead past the 2-hour floor, reached or not", () => {
+    expect(card.speed_to_lead.past_hard_floor).toEqual([
+      { id: 4, client: "C4", business_minutes: 180, contacted: false },
+      { id: 3, client: "C3", business_minutes: 150, contacted: true },
+    ]);
+  });
+});

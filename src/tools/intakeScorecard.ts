@@ -261,6 +261,10 @@ export interface ScorecardOptions {
   maturityDays: number;
   staleDays: number;
   slaBusinessMinutes: number;
+  /** The goal the SLA is moving toward; reported alongside it. Default 15. */
+  goalBusinessMinutes?: number;
+  /** A business-hours lead waiting longer than this is named, not averaged. Default 120. */
+  hardFloorBusinessMinutes?: number;
   userNames?: Record<number, string>;
   /** Matter ids whose notes were read (notes absent for others ≠ "no notes"). */
   notesRead?: Set<number>;
@@ -284,6 +288,10 @@ export function computeIntakeScorecard(
   let withLeadNote = 0;
   let withContactNote = 0;
   let withinSla = 0;
+  let withinGoal = 0;
+  const goal = opts.goalBusinessMinutes ?? 15;
+  const floor = opts.hardFloorBusinessMinutes ?? 120;
+  const pastFloor: Array<{ id: number; client: string | null; business_minutes: number; contacted: boolean }> = [];
   let afterHoursLeads = 0;
   let afterHoursNextMorning = 0;
   const bySource: Record<string, { added: number; hired: number; declined: number }> = {};
@@ -312,6 +320,8 @@ export function computeIntakeScorecard(
       const biz = businessMinutesBetween(p.received_at, p.contacted_at);
       speedBiz.push(biz);
       if (biz <= opts.slaBusinessMinutes) withinSla++;
+      if (biz <= goal) withinGoal++;
+      if (biz > floor) pastFloor.push({ id: m.id, client: m.client?.full_name ?? null, business_minutes: biz, contacted: true });
       if (isBusinessHours(p.received_at)) speedBizInHours.push(biz);
       else {
         afterHoursLeads++;
@@ -320,12 +330,14 @@ export function computeIntakeScorecard(
         if (biz <= 60) afterHoursNextMorning++;
       }
     } else if (p.received_at && !p.contacted_at && m.status_category === "intake") {
+      const waiting = businessMinutesBetween(p.received_at, opts.asOf);
       uncontacted.push({
         id: m.id,
         client: m.client?.full_name ?? null,
         received_at: p.received_at,
-        business_minutes_waiting: businessMinutesBetween(p.received_at, opts.asOf),
+        business_minutes_waiting: waiting,
       });
+      if (waiting > floor) pastFloor.push({ id: m.id, client: m.client?.full_name ?? null, business_minutes: waiting, contacted: false });
     }
   }
   const notesN = notesRead.size;
@@ -479,6 +491,8 @@ export function computeIntakeScorecard(
       speed_to_lead:
         "Business minutes (Mon–Fri 08:00–17:00 Central, no holidays) from [Lead Received] received_at to [First Contact] contacted_at.",
       sla_business_minutes: opts.slaBusinessMinutes,
+      goal_business_minutes: goal,
+      hard_floor_business_minutes: floor,
       matured_cohort: `A creation month whose last day is at least ${opts.maturityDays} days before as_of. Conversion is reported only for matured cohorts; younger months show hire_rate_to_date only.`,
       fee_agreement_sent: "Grow first_letter_sent_date (first letter sent from Grow), else a [Fee Agreement Sent] note.",
       stale: `Open (not hired/declined) and not updated in more than ${opts.staleDays} days.`,
@@ -489,6 +503,8 @@ export function computeIntakeScorecard(
       all_business_minutes: dist(speedBiz),
       business_hours_leads_minutes: dist(speedBizInHours),
       within_sla: { n: withinSla, of: speedBiz.length, pct: pct(withinSla, speedBiz.length) },
+      within_goal: { n: withinGoal, of: speedBiz.length, pct: pct(withinGoal, speedBiz.length) },
+      past_hard_floor: pastFloor.sort((a, b) => b.business_minutes - a.business_minutes),
       after_hours_leads: {
         n: afterHoursLeads,
         reached_by_9am_next_business_day: afterHoursNextMorning,
@@ -560,7 +576,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
 export function registerIntakeScorecardTools(server: McpServer): void {
   server.tool(
     "get_intake_scorecard",
-    "Intake KPIs from Clio Grow for a creation window: speed to lead (business minutes from the [Lead Received] note to the [First Contact] note, % within SLA, after-hours leads reached by 9am), funnel stage timing (Grow created → fee agreement sent → hired), cohort conversion reported only for matured months, breakdowns by matter type, assignee and lead source, loss reasons from [Disposition] notes, and pipeline hygiene (open potentials by days since update, the stale list). Every metric carries its coverage; missing inputs are reported as warnings, never as zeros. Reads one notes call per matter in the window (cap with max_notes_matters).",
+    "Intake KPIs from Clio Grow for a creation window: speed to lead (business minutes from the [Lead Received] note to the [First Contact] note: % within the standard (default 30) and the goal (default 15), leads past the 2-hour hard floor by name, after-hours leads reached by 9am), funnel stage timing (Grow created → fee agreement sent → hired), cohort conversion reported only for matured months, breakdowns by matter type, assignee and lead source, loss reasons from [Disposition] notes, and pipeline hygiene (open potentials by days since update, the stale list). Every metric carries its coverage; missing inputs are reported as warnings, never as zeros. Reads one notes call per matter in the window (cap with max_notes_matters).",
     {
       created_since: z
         .string()
@@ -572,7 +588,12 @@ export function registerIntakeScorecardTools(server: McpServer): void {
         .describe("Only matters assigned to this Grow user (an attorney or the intake specialist)."),
       maturity_days: z.number().optional().describe("Days after a month ends before its conversion is reported. Default 60."),
       stale_days: z.number().optional().describe("Open and not updated in more than this many days = stale. Default 14."),
-      sla_business_minutes: z.number().optional().describe("Speed-to-lead SLA in business minutes. Default 15."),
+      sla_business_minutes: z.number().optional().describe("Speed-to-lead standard in business minutes. Default 30."),
+      goal_business_minutes: z.number().optional().describe("Speed-to-lead goal, reported beside the standard. Default 15."),
+      hard_floor_business_minutes: z
+        .number()
+        .optional()
+        .describe("Leads waiting (or reached) past this many business minutes are listed by name. Default 120."),
       include_notes: z
         .boolean()
         .optional()
@@ -616,7 +637,9 @@ export function registerIntakeScorecardTools(server: McpServer): void {
           asOf,
           maturityDays: args.maturity_days ?? 60,
           staleDays: args.stale_days ?? 14,
-          slaBusinessMinutes: args.sla_business_minutes ?? 15,
+          slaBusinessMinutes: args.sla_business_minutes ?? 30,
+          goalBusinessMinutes: args.goal_business_minutes ?? 15,
+          hardFloorBusinessMinutes: args.hard_floor_business_minutes ?? 120,
           userNames,
           notesRead,
           staleListLimit: args.stale_list_limit,
