@@ -111,6 +111,7 @@ describe("computeIntakeScorecard", () => {
     staleDays: 14,
     slaBusinessMinutes: 15,
     userNames: { 1: "Intake" },
+    speedTrackingSince: "2026-01-01T00:00:00Z",
   });
 
   it("measures speed to lead in business minutes against the SLA", () => {
@@ -277,5 +278,25 @@ describe("inbox leads that never became a matter", () => {
   it("is null, not zero, when inbox leads were not read", () => {
     const c = computeIntakeScorecard([], new Map(), { asOf: "2026-11-19T20:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30 });
     expect(c.inbox).toBeNull();
+  });
+});
+
+describe("speed tracking starts at go-live", () => {
+  const lead = (recv: string) => [{ subject: "[Lead Received]", body: `received_at: ${recv}`, created_at: recv }];
+  const card = computeIntakeScorecard(
+    [
+      { id: 1, created_at: "2026-11-14T03:26:00Z", updated_at: "2026-11-18T15:00:00Z", status_category: "intake", client: { full_name: "Before" } },
+      { id: 2, created_at: "2026-11-19T16:00:00Z", updated_at: "2026-11-19T16:00:00Z", status_category: "intake", client: { full_name: "After" } },
+    ] as any,
+    new Map([[1, lead("2026-11-14T03:26:00Z")], [2, lead("2026-11-19T16:00:00Z")]]) as any,
+    { asOf: "2026-11-20T20:00:00Z", maturityDays: 60, staleDays: 14, slaBusinessMinutes: 30, speedTrackingSince: "2026-11-19T06:00:00Z" }
+  );
+  it("lists only leads received since tracking began as waiting or past the floor", () => {
+    expect(card.speed_to_lead.awaiting_first_contact.map((r) => r.id)).toEqual([2]);
+    expect(card.speed_to_lead.past_hard_floor.map((r) => r.id)).toEqual([2]);
+  });
+  it("bases the coverage warning on tracked matters and explains the rest", () => {
+    expect(card.warnings.some((w) => w.includes("0 of 1 matters received since tracking began"))).toBe(true);
+    expect(card.warnings.some((w) => w.includes("1 matters predate speed tracking"))).toBe(true);
   });
 });
