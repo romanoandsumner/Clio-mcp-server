@@ -30,6 +30,9 @@ import { growFetchAllPages, growGetSingle } from "../clio/grow";
 // never as a zero. A scorecard that reads "0 minutes" because nobody logged
 // first contact is the failure this module exists to prevent.
 
+/** Go-live of log-a-lead and intake-call: 2026-11-19 00:00 Central (CST). */
+export const DEFAULT_SPEED_TRACKING_SINCE = "2026-11-19T06:00:00Z";
+
 export const INTAKE_NOTE_SUBJECTS = {
   leadReceived: "[Lead Received]",
   firstContact: "[First Contact]",
@@ -266,6 +269,14 @@ export interface ScorecardOptions {
   goalBusinessMinutes?: number;
   /** A business-hours lead waiting longer than this is named, not averaged. Default 120. */
   hardFloorBusinessMinutes?: number;
+  /**
+   * Speed to lead is tracked from this instant (go-live of log-a-lead and
+   * intake-call, 2026-11-19). Before it, nobody wrote [First Contact] notes, so
+   * an earlier lead with no first contact is not "waiting" — it was simply
+   * never logged. Earlier leads are left out of the waiting list, the hard-floor
+   * list and the speed-coverage warning; they still count everywhere else.
+   */
+  speedTrackingSince?: string;
   userNames?: Record<number, string>;
   /** Matter ids whose notes were read (notes absent for others ≠ "no notes"). */
   notesRead?: Set<number>;
@@ -317,6 +328,9 @@ export function computeIntakeScorecard(
   const lossReasons: Record<string, number> = {};
   const uncontacted: Array<{ id: number; client: string | null; received_at: string; business_minutes_waiting: number }> = [];
 
+  const trackingSinceMs = Date.parse(opts.speedTrackingSince ?? DEFAULT_SPEED_TRACKING_SINCE);
+  let trackedN = 0;
+  let trackedContact = 0;
   const parsed = new Map<number, ParsedIntakeNotes>();
   for (const m of matters) {
     if (!notesRead.has(m.id)) continue;
@@ -333,6 +347,11 @@ export function computeIntakeScorecard(
     parsed.set(m.id, p);
     if (p.received_at) withLeadNote++;
     if (p.contacted_at) withContactNote++;
+    const tracked = Date.parse(p.received_at ?? m.created_at) >= trackingSinceMs;
+    if (tracked) {
+      trackedN++;
+      if (p.contacted_at) trackedContact++;
+    }
     const src = p.source ?? "(not logged)";
     bySource[src] ??= { added: 0, hired: 0, declined: 0 };
     bySource[src].added++;
@@ -356,7 +375,7 @@ export function computeIntakeScorecard(
         // i.e. within the first 60 business minutes.
         if (biz <= 60) afterHoursNextMorning++;
       }
-    } else if (p.received_at && !p.contacted_at && m.status_category === "intake") {
+    } else if (tracked && p.received_at && !p.contacted_at && m.status_category === "intake") {
       const waiting = businessMinutesBetween(p.received_at, opts.asOf);
       uncontacted.push({
         id: m.id,
@@ -499,9 +518,13 @@ export function computeIntakeScorecard(
   };
 
   const warnings: string[] = [];
-  if (notesN && withContactNote / notesN < 0.8)
+  if (trackedN && trackedContact / trackedN < 0.8)
     warnings.push(
-      `Speed to lead covers only ${withContactNote} of ${notesN} matters (first contact not logged on the rest). Treat the speed numbers as a sample, not the firm's performance.`
+      `Speed to lead covers only ${trackedContact} of ${trackedN} matters received since tracking began (first contact not logged on the rest). Treat the speed numbers as a sample, not the firm's performance.`
+    );
+  if (notesN && trackedN < notesN)
+    warnings.push(
+      `${notesN - trackedN} matters predate speed tracking (${new Date(trackingSinceMs).toISOString().slice(0, 10)}); they have no first-contact notes by design and are left out of the waiting and hard-floor lists.`
     );
   if (!notesN) warnings.push("Notes were not read: speed to lead, source and loss reasons are not computed.");
   if (coverage.consult_booked_logged.n / Math.max(1, matters.length) < 0.5)
@@ -521,6 +544,7 @@ export function computeIntakeScorecard(
       sla_business_minutes: opts.slaBusinessMinutes,
       goal_business_minutes: goal,
       hard_floor_business_minutes: floor,
+      speed_tracking_since: new Date(trackingSinceMs).toISOString(),
       matured_cohort: `A creation month whose last day is at least ${opts.maturityDays} days before as_of. Conversion is reported only for matured cohorts; younger months show hire_rate_to_date only.`,
       fee_agreement_sent: "Grow first_letter_sent_date (first letter sent from Grow), else a [Fee Agreement Sent] note.",
       stale: `Open (not hired/declined) and not updated in more than ${opts.staleDays} days.`,
@@ -641,6 +665,10 @@ export function registerIntakeScorecardTools(server: McpServer): void {
       stale_days: z.number().optional().describe("Open and not updated in more than this many days = stale. Default 14."),
       sla_business_minutes: z.number().optional().describe("Speed-to-lead standard in business minutes. Default 30."),
       goal_business_minutes: z.number().optional().describe("Speed-to-lead goal, reported beside the standard. Default 15."),
+      speed_tracking_since: z
+        .string()
+        .optional()
+        .describe("Speed to lead is tracked from this instant (default 2026-11-19, go-live). Earlier leads have no first-contact notes by design and are not listed as waiting."),
       hard_floor_business_minutes: z
         .number()
         .optional()
@@ -718,6 +746,7 @@ export function registerIntakeScorecardTools(server: McpServer): void {
           slaBusinessMinutes: args.sla_business_minutes ?? 30,
           goalBusinessMinutes: args.goal_business_minutes ?? 15,
           hardFloorBusinessMinutes: args.hard_floor_business_minutes ?? 120,
+          speedTrackingSince: args.speed_tracking_since,
           userNames,
           notesRead,
           staleListLimit: args.stale_list_limit,
